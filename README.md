@@ -53,7 +53,7 @@ Maybe.
 
 If I were to compare the current state of creative tools using the functional transform stack representation to the original functional 
 programming language, LISP, what current software is missing is introspection. One of the major features of LISP is that executable instructions
-could be processed similarly to data. Taking this idea over to software, what artists are missing is not just complete control over their
+can be processed similarly to data. Taking this idea over to software, what artists are missing is not just complete control over their
 art, but complete control over their tools. If the transform stack is thought of as the "instructions," artists should be given the means to 
 create transforms to modify the "instuctions" just as they would modify any other set of data. These meta-instuctions could be mapped to run when,
 say, a key is pressed or a control is dragged.
@@ -75,4 +75,14 @@ A few things to still figure out with this method:
 
 ## comparisons to other software
 
-This 
+This model actually shares some similarities to the models used by video editors and other, more advanced, sequencing tools such as Unreal's 
+sequencer and OpenTimelineIO:
+
+![sequencer](photo5.png)
+![otio](photo4.jpg)
+
+Here, the scene can be seen as a "stack" of transforms that take in time and some time-varying data as the input and produce the evaluated data
+at the specified time as an output. Moreover, these evaluations can be blended and transformed in other ways on top of the initial evaluation.
+Using this representation, each discrete frame can be seen as having its own transform stack to evaluate, similarly to how each discrete vertex 
+had its own transform stack to evaluate. Even the visualizations look similar, each type of transform is given it's own color and they can be 
+seen as "layers" on top of each other.
