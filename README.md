@@ -79,10 +79,12 @@ This model actually shares some similarities to the models used by video editors
 sequencer and OpenTimelineIO:
 
 ![sequencer](photo5.png)
-![otio](photo4.jpg)
+![otio](photo4.png)
 
 Here, the scene can be seen as a "stack" of transforms that take in time and some time-varying data as the input and produce the evaluated data
 at the specified time as an output. Moreover, these evaluations can be blended and transformed in other ways on top of the initial evaluation.
 Using this representation, each discrete frame can be seen as having its own transform stack to evaluate, similarly to how each discrete vertex 
 had its own transform stack to evaluate. Even the visualizations look similar, each type of transform is given it's own color and they can be 
 seen as "layers" on top of each other.
+
+
