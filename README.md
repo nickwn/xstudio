@@ -81,10 +81,53 @@ sequencer and OpenTimelineIO:
 ![sequencer](photo5.png)
 ![otio](photo4.png)
 
-Here, the scene can be seen as a "stack" of transforms that take in time and some time-varying data as the input and produce the evaluated data
+Here, the scene can be seen as a bunch of transforms that take in time and some time-varying data as the input and produce the evaluated data
 at the specified time as an output. Moreover, these evaluations can be blended and transformed in other ways on top of the initial evaluation.
-Using this representation, each discrete frame can be seen as having its own transform stack to evaluate, similarly to how each discrete vertex 
-had its own transform stack to evaluate. Even the visualizations look similar, each type of transform is given it's own color and they can be 
-seen as "layers" on top of each other.
+Using this representation, each discrete frame can be seen as having its own transforms to evaluate, similarly to how each discrete vertex 
+had its own transform stack to evaluate. The difference from the previous modelling example is that (most) evaluations don't have any dependencies and 
+therefore can be done in any order (assuming the scene is deterministic and doesn't reqire data from the previous frame). I guess this means that
+the transform "stack" would be better defined as an evaluation "graph," but to keep things simple I'll stick to the stack-based representation
+for now. Even the visualizations look similar; each type of transform is given it's own color and they can be seen as "layers".
 
+## implementation
 
+For implementation specifics, the representation fits nicely into an entity-component system with an evaluation graph. For the ECS i'm using entt.
+In order to handle tools scripting, I wanted to use a graphical scripting language but those take a while to both design and develop. The ideal
+model would be something where the keyboard and mouse show up in the upper left hand corner of the screen and the user could drag lines from
+each key/mouse button to functions that would create transforms, manipulate transforms/transform parameters, and a final function that would 
+take in the initial transform stack and produce another transform stack that would add the new transform if its type isn't already at the
+top or most recent position and modify it otherwise. Transforms themselves could simply be defined as functions taking in data and parameters
+
+Because graphical scripting languages are hard, I'll probably start off with a functional beginner-friendly text-based programming language; the first one
+that pops into mind is [pyret](https://www.pyret.org/). However, I would like for there to be a few changes: Pyret has a few nice features for
+"reactive" programs; Reactors in Pyret allow for a program to specify functions to run on every tick, when a key is pressed, etc. However, there
+are a few problems with this system: 
+ * Sometimes, there are cases when multiple things would need to be true. In, say, a mesh painting mode, a texture painting tool would depend on
+ several user inputs. One UI control to control whether texture painting or geometry painting is enabled, a check to see whether the mouse 
+ position ray cast into the scene hits a mesh, and a final check to see whether mouse button 1 is actually down. Binding to changes in any of these
+ states would make things unnecessarily difficult. Artists (or ok, maybe im being optimistic that artists would be doing this) would have to 
+ hook into callbacks for all the state changes they want to check, then hook into another callback in the reactor when only one of these states 
+ change (on-mouse), and finally check if the rest of the conditions are true to run the program. Maybe programmers are familiar with this.
+ * Sometimes, it might be better to split editing operations up. This is maybe a controversial opinion, but I personally believe that splitting 
+ editing operation types into modes helps reduce conceptual load and helps organize tools better, even if in some cases it might not be super
+ intuitive to be swapping modes to operate on the same data in different ways. In pyret-speak, this would mean having the ability to specify 
+ multiple reactors and be able to set them as active or not active. Unreal engine has something similar with edit modes, where viewport editing
+ tools can extend a UEdMode/FEdMode class and implement OnTick/Render/OnActorSelected/etc methods to implement viewport editing operations. You 
+ could also implement an IsCompatibleWith method to specify which edmodes this ed mode is compatible with when it is active.
+
+A more opportunistic way to handle this might be to use a "When" statement, like maybe similar to what is done in [Dynamicland](https://dynamicland.org/), 
+but really not at all and completely missing the point of the original. I really like Dynamicland's system of whens/claims/wishes and maybe 
+I'll figure out a way to match this model to my system later, but for now I feel like they're not really super compatible. In my head, a tool node 
+would have one main section of code with no special fluff that would run continuously, except it wouldn't even be labelled on-tick, it would 
+just be kind of like writing a simple script in python - no main method needed. Then, there would be sections labelled (for example) 
+"When is_texture_painting and mouse_intersects_object and mouse_1_down" and code in those sections would be run when the conditions are true. 
+Actually, I'm kind of stupid: since all the code in the node would be running per tick, these could just be if statements. Also, these nodes 
+would have to have a way of being active. There could be things like super-if statements that would check for conditions in UI to be true (like
+maybe checking a nodes list), but the list could also just be a built-in feature like it is in Unreal with EdModes.
+
+## applications to other software
+
+Each vertex can be thought of as its own computer, maybe some applications to VLSI and programming very large systems. The use of very 
+large systems as a powerful visualization tool as seen in [Stephen Wolphram's](https://arxiv.org/ftp/arxiv/papers/2004/2004.08210.pdf) 
+([article](https://tinyurl.com/y2p7qav3))(ok, kind of sketch research but still kind of cool) work and 
+[Misha Mahowald](http://www.ini.uzh.ch/~tobi/papers/mishathesis.pdf). 
