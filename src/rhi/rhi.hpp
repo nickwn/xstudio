@@ -17,11 +17,18 @@ std::shared_ptr<resource_type> create_ ## resource_type ## _shared(Ts... args) \
         [device = shared_from_this()](resource_type* ptr){device->free_ ## resource_type(ptr);}); \
 }
 
+namespace xs
+{
 namespace rhi
 {
-
 namespace impl_
 {
+    struct context_gfx_data;
+    struct context_plat_data;
+
+    struct surface_gfx_data;
+    struct surface_plat_data;
+
     struct device_data;
 
     struct shader;
@@ -180,6 +187,7 @@ enum class image_usage : uint16_t
     depth_stencil_attachment_bit = 0x0020,
     transient_attachment_bit = 0x0040,
     input_attachment_bit = 0x0080,
+    resolve_attachment_bit = 0x0100
 };
 
 enum class filter : uint8_t
@@ -292,7 +300,7 @@ enum class dynamic_state : uint8_t
     stencil_reference = 0x40
 };
 
-enum class initial_action
+enum class initial_action : uint8_t
 {
     clear,
     keep,
@@ -300,16 +308,65 @@ enum class initial_action
     ia_continue,
 };
 
-enum class final_action
+enum class final_action : uint8_t
 {
     read,
     discard,
     fa_continue
 };
 
+enum class primitive_topology : uint8_t
+{
+    points,
+    lines,
+    lines_with_adjacency,
+    line_strips,
+    line_strips_with_adjacency,
+    triangles,
+    triangles_with_adjacency,
+    triangle_strips,
+    triangle_strips_with_adjacency,
+    triangle_strips_with_restart_index,
+    tesselation_patch,
+};
+
+enum class index_type : uint8_t
+{
+    uint16,
+    uint32
+};
+
+class rendering_context
+{
+public:
+    rendering_context();
+
+    friend class rendering_surface;
+    friend class rendering_device;
+private:
+    std::unique_ptr<impl_::context_gfx_data> context_gfx_data_ptr_;
+    std::unique_ptr<impl_::context_plat_data> context_plat_data_ptr_;
+};
+
+class rendering_surface
+{
+public:
+    rendering_surface(const rendering_context& ctx, std::wstring name, uint32_t height, uint32_t width);
+
+    friend class rendering_device;
+private:
+    uint32_t height_;
+    uint32_t width_;
+
+    std::unique_ptr<impl_::surface_gfx_data> surface_gfx_data_ptr_; // Graphics API specific data
+    std::unique_ptr<impl_::surface_plat_data> surface_plat_data_ptr_; // platform specific data
+};
+
 class rendering_device : std::enable_shared_from_this<rendering_device>
 {
 public:
+
+    rendering_device(const rendering_context& ctx, rendering_surface* surface = nullptr);
 
     // Shaders
 
@@ -380,7 +437,7 @@ public:
     // Buffers
     // TODO: free, custom allocation
     buffer* create_buffer(buffer_type type, const size_t size, const void* data);
-    void update_buffer(const buffer const*, const size_t offset, const size_t size, const void const* data);
+    void update_buffer(buffer*, const size_t offset, const size_t size, const void const* data);
     void free_buffer(buffer* buffer);
 
     // Vertex format
@@ -438,13 +495,13 @@ public:
 
     struct pipeline_depth_stencil_state
     {
+        bool enable_depth_test;
         bool enable_stencil_test;
         bool enable_depth_write;
         compare_op depth_compare_operator;
         bool enable_depth_range;
         float min_depth_range;
         float max_depth_range;
-        bool enable_stencil;
 
         // TODO: ctor
         // TODO: stencil operation state
@@ -459,7 +516,7 @@ public:
         // TODO: blend attachments
     };
 
-    graphics_pipeline* create_graphics_pipeline(std::vector<shader*> shaders, framebuffer_format_id ffid, vertex_format_id vfid, const pipeline_rasterization_state& rasterization_state, 
+    graphics_pipeline* create_graphics_pipeline(std::vector<shader*> shaders, std::vector<uniform_set*> uniforms, framebuffer_format_id ffid, vertex_format_id vfid, primitive_topology topology, const pipeline_rasterization_state& rasterization_state,
         const pipeline_multisample_state& multisample_state, const pipeline_depth_stencil_state& depth_stencil_state, const pipeline_color_blend_state& color_blend_state, dynamic_state dynamic_states);
 
     // TODO: compute pipeline
@@ -469,7 +526,7 @@ public:
     using cmd_buf_id = uint64_t;
     struct begin_gfx_cmd_buf_params
     {
-        framebuffer* frambuffer;
+        framebuffer* framebuffer;
         initial_action initial_color_action;
         final_action final_color_action;
         initial_action initial_depth_action;
@@ -483,10 +540,10 @@ public:
    
     cmd_buf_id begin_gfx_cmd_buf(const begin_gfx_cmd_buf_params& params);
     void gfx_cmd_buf_bind_pipeline(cmd_buf_id id, graphics_pipeline* pipeline);
-    void gfx_cmd_buf_bind_uniform_set(cmd_buf_id id, uniform_set* uniform_set, uint32_t index);
+    void gfx_cmd_buf_bind_uniform_set(cmd_buf_id id, uniform_set* uniform_set, graphics_pipeline* pipeline, uint32_t index);
     void gfx_cmd_buf_bind_vertex_array(cmd_buf_id id, buffer* vertex_array);
-    void gfx_cmd_buf_bind_index_array(cmd_buf_id id, buffer* index_array);
-    void gfx_cmd_buf_draw(cmd_buf_id id, bool use_indices, uint32_t instances = 1);
+    void gfx_cmd_buf_bind_index_array(cmd_buf_id id, buffer* index_array, index_type index_type);
+    void gfx_cmd_buf_draw(cmd_buf_id id, bool use_indices, uint32_t element_count, uint32_t instances = 1);
     void gfx_cmd_buf_end(cmd_buf_id id);
 
     // TODO: compute lists
@@ -502,4 +559,5 @@ private:
     std::unique_ptr<impl_::device_data> device_data_ptr_;
 };
 
-}
+} // namespace rhi
+} // namespace xs

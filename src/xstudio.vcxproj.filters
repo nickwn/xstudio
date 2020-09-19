@@ -1,0 +1,54 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <ItemGroup>
+    <Filter Include="Source Files">
+      <UniqueIdentifier>{4FC737F1-C7A5-4376-A066-2A32D752A2FF}</UniqueIdentifier>
+      <Extensions>cpp;c;cc;cxx;c++;def;odl;idl;hpj;bat;asm;asmx</Extensions>
+    </Filter>
+    <Filter Include="Header Files">
+      <UniqueIdentifier>{93995380-89BD-4b04-88EB-625FBE52EBFB}</UniqueIdentifier>
+      <Extensions>h;hh;hpp;hxx;h++;hm;inl;inc;ipp;xsd</Extensions>
+    </Filter>
+    <Filter Include="Resource Files">
+      <UniqueIdentifier>{67DA6AB6-F800-4c08-8B7A-83BB121AAD01}</UniqueIdentifier>
+      <Extensions>rc;ico;cur;bmp;dlg;rc2;rct;bin;rgs;gif;jpg;jpeg;jpe;resx;tiff;tif;png;wav;mfcribbon-ms</Extensions>
+    </Filter>
+    <Filter Include="Source Files\meth">
+      <UniqueIdentifier>{da86bbcd-d6bf-4977-be88-e555d8095e00}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\rhi">
+      <UniqueIdentifier>{fb2e6eaf-b51b-4be9-8c45-b05373531ec2}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files\meth">
+      <UniqueIdentifier>{df937005-4c58-450d-8fb6-62f73934f3ae}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Header Files\rhi">
+      <UniqueIdentifier>{8dd4f832-1dca-4803-99be-0295c9b7df06}</UniqueIdentifier>
+    </Filter>
+  </ItemGroup>
+  <ItemGroup>
+    <ClCompile Include="..\src\main.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="meth\meth.cpp">
+      <Filter>Source Files\meth</Filter>
+    </ClCompile>
+    <ClCompile Include="rhi\rhi_vk.cpp">
+      <Filter>Source Files\rhi</Filter>
+    </ClCompile>
+    <ClCompile Include="rhi\rhi_vk_win.cpp">
+      <Filter>Source Files\rhi</Filter>
+    </ClCompile>
+  </ItemGroup>
+  <ItemGroup>
+    <ClInclude Include="meth\meth.hpp">
+      <Filter>Header Files\meth</Filter>
+    </ClInclude>
+    <ClInclude Include="rhi\rhi.hpp">
+      <Filter>Header Files\rhi</Filter>
+    </ClInclude>
+    <ClInclude Include="rhi\rhi_vk.hpp">
+      <Filter>Header Files\rhi</Filter>
+    </ClInclude>
+  </ItemGroup>
+</Project>

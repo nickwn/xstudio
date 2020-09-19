@@ -1,7 +1,10 @@
 #include "rhi.hpp"
+#include "rhi_vk.hpp"
 #include <vulkan/vulkan.hpp>
 #include <vector>
 
+namespace xs
+{
 namespace rhi
 {
 namespace impl_
@@ -20,16 +23,29 @@ namespace impl_
 		vk::PipelineVertexInputStateCreateInfo input_state_create_info;
 	};
 
-	// public interface objects
+	struct frame_data
+	{
+		vk::UniqueCommandPool cmd_pool;
+		rendering_device::cmd_buf_id cmd_buf_id;
+		vk::Framebuffer bound_framebuffer;
+	};
 
 	struct device_data
 	{
-		vk::Device device;
+		vk::UniqueDevice device;
 		vk::PhysicalDevice physical_device;
 		std::vector<framebuffer_format> framebuffer_formats;
 		std::vector<vertex_format> vertex_formats;
 		std::vector<vk::UniqueDescriptorPool> desc_pools; // TODO: pool reference count
+		std::vector<vk::UniqueCommandBuffer> cmd_bufs;
+		std::vector<frame_data> frames;
+		uint32_t frame;
+		uint32_t gfx_queue_fam_idx;
+		uint32_t compute_queue_fam_idx;
+		uint32_t present_queue_fam_idx;
 	};
+
+	// public interface objects
 
 	struct shader
 	{
@@ -38,7 +54,8 @@ namespace impl_
 
 	struct graphics_pipeline
 	{
-
+		vk::Pipeline pipeline;
+		vk::PipelineLayout layout;
 	};
 
 	struct texture
@@ -312,6 +329,20 @@ namespace impl_
 		vk::DescriptorType::eInputAttachment
 	};
 
+	static const vk::PrimitiveTopology topology_list[] = {
+		vk::PrimitiveTopology::ePointList,
+		vk::PrimitiveTopology::eLineList,
+		vk::PrimitiveTopology::eLineListWithAdjacency,
+		vk::PrimitiveTopology::eLineStrip,
+		vk::PrimitiveTopology::eLineStripWithAdjacency,
+		vk::PrimitiveTopology::eTriangleList,
+		vk::PrimitiveTopology::eTriangleListWithAdjacency,
+		vk::PrimitiveTopology::eTriangleStrip,
+		vk::PrimitiveTopology::eTriangleStripWithAdjacency,
+		vk::PrimitiveTopology::eTriangleStrip,
+		vk::PrimitiveTopology::ePatchList
+	};
+
 	size_t get_format_vertex_size(format fmt)
 	{
 		switch (fmt)
@@ -418,13 +449,130 @@ namespace impl_
 
 } // namespace impl_
 
+rendering_context::rendering_context() : 
+	context_gfx_data_ptr_(std::make_unique<impl_::context_gfx_data>()),
+	context_plat_data_ptr_(std::make_unique<impl_::context_plat_data>()) // potential problem
+{
+	vk::ApplicationInfo app_info = vk::ApplicationInfo()
+		.setPApplicationName("application name")
+		.setApplicationVersion(0)
+		.setPEngineName("!(unity||unreal)")
+		.setEngineVersion(0)
+		.setApiVersion(VK_API_VERSION_1_1);
+
+	static std::vector<const char*> layers = {}; // TODO
+	static std::vector<const char*> extensions = {};
+
+	auto inst_info = vk::InstanceCreateInfo()
+		.setPApplicationInfo(&app_info)
+		.setEnabledLayerCount(layers.size())
+		.setPpEnabledLayerNames(layers.data())
+		.setEnabledExtensionCount(extensions.size())
+		.setPpEnabledExtensionNames(extensions.data());
+
+	context_gfx_data_ptr_->instance = vk::createInstanceUnique(inst_info);
+}
+
+rendering_device::rendering_device(const rendering_context& ctx, rendering_surface* surface)
+	: device_data_ptr_(std::make_unique<impl_::device_data>())
+{
+	std::vector<vk::PhysicalDevice> physical_devices = ctx.context_gfx_data_ptr_->instance->enumeratePhysicalDevices();
+	for (const vk::PhysicalDevice& physical_device : physical_devices)
+	{
+		bool has_gfx_or_compute = false;
+		std::vector<vk::QueueFamilyProperties> queue_fam_props = physical_device.getQueueFamilyProperties();
+		for (uint32_t i = 0; i < queue_fam_props.size(); i++)
+		{
+			has_gfx_or_compute |= (queue_fam_props[i].queueFlags & vk::QueueFlagBits::eCompute || queue_fam_props[i].queueFlags & vk::QueueFlagBits::eGraphics);
+			if (queue_fam_props[i].queueFlags & vk::QueueFlagBits::eCompute)
+			{
+				device_data_ptr_->compute_queue_fam_idx = i;
+			}
+			if (queue_fam_props[i].queueFlags & vk::QueueFlagBits::eGraphics)
+			{
+				device_data_ptr_->gfx_queue_fam_idx = i;
+			}
+		}
+
+		bool good_device = has_gfx_or_compute;
+		if (surface)
+		{
+			bool device_supports_surface = false;
+			for (uint32_t queue_fam_idx = 0; queue_fam_idx < queue_fam_props.size(); queue_fam_idx++)
+			{
+				vk::Bool32 queue_fam_supports_surface = physical_device.getSurfaceSupportKHR(queue_fam_idx, surface->surface_gfx_data_ptr_->surface);
+				if (queue_fam_supports_surface)
+				{
+					device_data_ptr_->present_queue_fam_idx = queue_fam_idx;
+				}
+				device_supports_surface |= bool(queue_fam_supports_surface);
+			}
+
+			good_device &= device_supports_surface;
+		}
+
+		if (good_device)
+		{
+			device_data_ptr_->physical_device = physical_device;
+			break;
+		}
+	}
+
+	std::vector<vk::QueueFamilyProperties> queue_fam_props = device_data_ptr_->physical_device.getQueueFamilyProperties();
+	std::vector<vk::DeviceQueueCreateInfo> queue_create_infos(queue_fam_props.size());
+	std::vector<std::vector<float>> queue_priorities(queue_fam_props.size());
+	for (size_t i = 0; i < queue_fam_props.size(); i++)
+	{
+		queue_priorities[i] = std::vector<float>(queue_fam_props[i].queueCount, 1.f);
+		queue_create_infos[i] = vk::DeviceQueueCreateInfo()
+			.setQueueFamilyIndex(i)
+			.setQueueCount(queue_fam_props[i].queueCount)
+			.setPQueuePriorities(queue_priorities[i].data());
+	}
+
+	static std::vector<const char*> layers = {};
+	static std::vector<const char*> extensions = {};
+
+	vk::DeviceCreateInfo device_create_info = vk::DeviceCreateInfo()
+		.setQueueCreateInfoCount(queue_create_infos.size())
+		.setPQueueCreateInfos(queue_create_infos.data())
+		.setEnabledLayerCount(layers.size())
+		.setPpEnabledLayerNames(layers.data())
+		.setEnabledExtensionCount(extensions.size())
+		.setPpEnabledExtensionNames(extensions.data())
+		.setPEnabledFeatures(nullptr);
+
+	device_data_ptr_->device = device_data_ptr_->physical_device.createDeviceUnique(device_create_info);
+
+	device_data_ptr_->frame = 0;
+
+	const size_t frame_count = surface ? surface->surface_gfx_data_ptr_->swapchain_image_count : 1;
+	device_data_ptr_->cmd_bufs.resize(frame_count);
+	device_data_ptr_->frames.resize(frame_count);
+	for (size_t i = 0; i < frame_count; i++)
+	{
+		vk::CommandPoolCreateInfo cmd_pool_create_info = vk::CommandPoolCreateInfo()
+			.setFlags(vk::CommandPoolCreateFlagBits::eResetCommandBuffer)
+			.setQueueFamilyIndex(device_data_ptr_->gfx_queue_fam_idx);
+		device_data_ptr_->frames[i].cmd_pool = device_data_ptr_->device->createCommandPoolUnique(cmd_pool_create_info);
+
+		vk::CommandBufferAllocateInfo cmd_buf_alloc_info = vk::CommandBufferAllocateInfo()
+			.setCommandPool(device_data_ptr_->frames[i].cmd_pool.get())
+			.setLevel(vk::CommandBufferLevel::ePrimary)
+			.setCommandBufferCount(1);
+		device_data_ptr_->cmd_bufs[i] = std::move(device_data_ptr_->device->allocateCommandBuffersUnique(cmd_buf_alloc_info)[0]);
+
+		device_data_ptr_->frames[i].cmd_buf_id = i;
+	}
+}
+
 shader* rendering_device::create_shader(const create_shader_params& params)
 {
 	vk::ShaderModuleCreateInfo shader_module_create_info = vk::ShaderModuleCreateInfo()
 		.setFlags(vk::ShaderModuleCreateFlags())
 		.setCodeSize(params.bytecode.size())
 		.setPCode(reinterpret_cast<uint32_t*>(const_cast<char*>(params.bytecode.c_str())));
-	vk::ShaderModule shader_module = device_data_ptr_->device.createShaderModule(shader_module_create_info);
+	vk::ShaderModule shader_module = device_data_ptr_->device->createShaderModule(shader_module_create_info);
 	
 	shader* result = new shader;
 	result->pipeline_stage_create_info = vk::PipelineShaderStageCreateInfo()
@@ -439,7 +587,7 @@ shader* rendering_device::create_shader(const create_shader_params& params)
 
 void rendering_device::free_shader(shader* shader)
 {
-	device_data_ptr_->device.destroyShaderModule(shader->pipeline_stage_create_info.module);
+	device_data_ptr_->device->destroyShaderModule(shader->pipeline_stage_create_info.module);
 	delete shader;
 }
 
@@ -516,17 +664,17 @@ texture* rendering_device::create_texture(const create_texture_params& params, s
 	texture* result = new texture;
 
 	result->create_params = params;
-	result->image = device_data_ptr_->device.createImage(image_create_info);
+	result->image = device_data_ptr_->device->createImage(image_create_info);
 
-	vk::MemoryRequirements mem_requirements = device_data_ptr_->device.getImageMemoryRequirements(result->image);
+	vk::MemoryRequirements mem_requirements = device_data_ptr_->device->getImageMemoryRequirements(result->image);
 
 	vk::MemoryAllocateInfo mem_alloc_info = vk::MemoryAllocateInfo()
 		.setAllocationSize(mem_requirements.size)
 		.setMemoryTypeIndex(impl_::find_memory_type(mem_requirements.memoryTypeBits, vk::MemoryPropertyFlags(), device_data_ptr_->physical_device));
 	
 	// TODO: use vma
-	result->memory = device_data_ptr_->device.allocateMemory(mem_alloc_info);
-	device_data_ptr_->device.bindImageMemory(result->image, result->memory, 0);
+	result->memory = device_data_ptr_->device->allocateMemory(mem_alloc_info);
+	device_data_ptr_->device->bindImageMemory(result->image, result->memory, 0);
 
 	vk::ImageSubresourceRange subresource_range = vk::ImageSubresourceRange(
 		(uint8_t(params.usage) & uint8_t(image_usage::depth_stencil_attachment_bit)) ? 
@@ -540,7 +688,7 @@ texture* rendering_device::create_texture(const create_texture_params& params, s
 		.setComponents(vk::ComponentMapping()) // TODO: no swizzling for now
 		.setSubresourceRange(subresource_range);
 
-	result->image_view = device_data_ptr_->device.createImageView(image_view_create_info);
+	result->image_view = device_data_ptr_->device->createImageView(image_view_create_info);
 
 	if (data.size() > 0) {
 		for (uint32_t i = 0; i < image_create_info.arrayLayers; i++) {
@@ -555,20 +703,104 @@ texture* rendering_device::create_texture(const create_texture_params& params, s
 
 void rendering_device::free_texture(texture* texture)
 {
-	device_data_ptr_->device.destroyImageView(texture->image_view);
-	device_data_ptr_->device.freeMemory(texture->memory);
-	device_data_ptr_->device.destroyImage(texture->image);
+	device_data_ptr_->device->destroyImageView(texture->image_view);
+	device_data_ptr_->device->freeMemory(texture->memory);
+	device_data_ptr_->device->destroyImage(texture->image);
 	delete texture;
 }
 
 rendering_device::framebuffer_format_id rendering_device::create_framebuffer_format(std::vector<attachment_format> formats)
 {
-	uint32_t num_color_references;
-	vk::RenderPass render_pass = device_data_ptr_->create_render_pass(initial_action::clear, final_action::discard,
-		initial_action::clear, final_action::discard, &num_color_references);
+	std::vector<vk::AttachmentDescription> attachments;
+	std::vector<vk::AttachmentReference> color_references;
+	std::vector<vk::AttachmentReference> depth_stencil_references;
+	std::vector<vk::AttachmentReference> resolve_references;
+
+	for (uint32_t i = 0; i < formats.size(); i++)
+	{
+		bool is_color = uint16_t(formats[i].usage) & uint16_t(image_usage::color_attachment_bit);
+		bool is_depth_stencil = uint16_t(formats[i].usage) & uint16_t(image_usage::depth_stencil_attachment_bit);
+		bool is_resolve = uint16_t(formats[i].usage) & uint16_t(image_usage::resolve_attachment_bit);
+		bool is_sampled = uint16_t(formats[i].usage) & uint16_t(image_usage::sampled_bit);
+		bool is_storage = uint16_t(formats[i].usage) & uint16_t(image_usage::storage_bit);
+		
+		vk::AttachmentLoadOp load_op = vk::AttachmentLoadOp::eClear, stencil_load_op = vk::AttachmentLoadOp::eClear;
+		vk::ImageLayout initial_layout = vk::ImageLayout::eUndefined;
+		vk::AttachmentStoreOp store_op, stencil_store_op;
+		vk::ImageLayout final_layout;
+		if (is_color) {
+			store_op = vk::AttachmentStoreOp::eDontCare;
+			stencil_store_op = vk::AttachmentStoreOp::eDontCare;
+			final_layout = is_sampled ? vk::ImageLayout::eShaderReadOnlyOptimal : (is_storage ? vk::ImageLayout::eGeneral : vk::ImageLayout::eColorAttachmentOptimal);
+		}
+		else if (is_depth_stencil) {
+			store_op = vk::AttachmentStoreOp::eDontCare;
+			stencil_store_op = vk::AttachmentStoreOp::eDontCare;
+			final_layout = is_sampled ? vk::ImageLayout::eShaderReadOnlyOptimal : (is_storage ? vk::ImageLayout::eGeneral : vk::ImageLayout::eDepthStencilAttachmentOptimal);
+		}
+		else {
+			load_op = vk::AttachmentLoadOp::eDontCare;
+			stencil_load_op = vk::AttachmentLoadOp::eDontCare;
+			initial_layout = vk::ImageLayout::eUndefined;
+		}
+
+		vk::AttachmentDescription description = vk::AttachmentDescription()
+			.setFormat(impl_::vulkan_formats[uint8_t(formats[i].format)])
+			.setSamples(impl_::rasterization_sample_count[uint8_t(formats[i].samples)])
+			.setLoadOp(load_op)
+			.setStencilLoadOp(stencil_load_op)
+			.setInitialLayout(initial_layout)
+			.setStoreOp(store_op)
+			.setStencilStoreOp(stencil_store_op)
+			.setFinalLayout(final_layout);
+		attachments.push_back(description);
+
+		if (is_color)
+		{
+			color_references.push_back(vk::AttachmentReference()
+				.setAttachment(i)
+				.setLayout(vk::ImageLayout::eColorAttachmentOptimal)
+			);
+		}
+		else if (is_depth_stencil)
+		{
+			depth_stencil_references.push_back(vk::AttachmentReference()
+				.setAttachment(i)
+				.setLayout(vk::ImageLayout::eDepthStencilAttachmentOptimal)
+			);
+		}
+		else if (is_resolve)
+		{
+			resolve_references.push_back(vk::AttachmentReference()
+				.setAttachment(i)
+				.setLayout(vk::ImageLayout::eColorAttachmentOptimal)
+			);
+		}
+	}
+
+	vk::SubpassDescription subpass = vk::SubpassDescription()
+		.setPipelineBindPoint(vk::PipelineBindPoint::eGraphics)
+		.setInputAttachmentCount(0)
+		.setPInputAttachments(nullptr)
+		.setColorAttachmentCount(color_references.size())
+		.setPColorAttachments(color_references.data())
+		.setPDepthStencilAttachment(depth_stencil_references.data())
+		.setPResolveAttachments(resolve_references.data())
+		.setPreserveAttachmentCount(0)
+		.setPResolveAttachments(nullptr);
+
+	vk::RenderPassCreateInfo render_pass_create_info = vk::RenderPassCreateInfo()
+		.setAttachmentCount(attachments.size())
+		.setPAttachments(attachments.data())
+		.setSubpassCount(1)
+		.setPSubpasses(&subpass)
+		.setDependencyCount(0)
+		.setPDependencies(nullptr);
+
+	vk::RenderPass render_pass = device_data_ptr_->device->createRenderPass(render_pass_create_info);
 
 	impl_::framebuffer_format new_format = impl_::framebuffer_format{
-		num_color_references,
+		color_references.size(),
 		render_pass,
 		formats[0].samples
 	};
@@ -626,13 +858,13 @@ sampler* rendering_device::create_sampler(const create_sampler_params& params)
 		.setUnnormalizedCoordinates(params.unnormalized_coords);
 
 	sampler* result = new sampler;
-	result->sampler = device_data_ptr_->device.createSampler(sampler_create_info);
+	result->sampler = device_data_ptr_->device->createSampler(sampler_create_info);
 	return result;
 }
 
 void rendering_device::free_sampler(sampler* sampler)
 {
-	device_data_ptr_->device.destroySampler(sampler->sampler);
+	device_data_ptr_->device->destroySampler(sampler->sampler);
 	delete sampler;
 }
 
@@ -658,30 +890,30 @@ buffer* rendering_device::create_buffer(buffer_type type, const size_t size, con
 		.setSharingMode(vk::SharingMode::eExclusive);
 
 	buffer* result = new buffer;
-	result->buffer = device_data_ptr_->device.createBuffer(buffer_create_info);
+	result->buffer = device_data_ptr_->device->createBuffer(buffer_create_info);
 
-	vk::MemoryRequirements mem_requirements = device_data_ptr_->device.getBufferMemoryRequirements(result->buffer);
+	vk::MemoryRequirements mem_requirements = device_data_ptr_->device->getBufferMemoryRequirements(result->buffer);
 
 	vk::MemoryAllocateInfo mem_alloc_info = vk::MemoryAllocateInfo()
 		.setAllocationSize(mem_requirements.size)
 		.setMemoryTypeIndex(impl_::find_memory_type(mem_requirements.memoryTypeBits, vk::MemoryPropertyFlags(), device_data_ptr_->physical_device));
 
 	// TODO: use vma
-	result->memory = device_data_ptr_->device.allocateMemory(mem_alloc_info);
-	device_data_ptr_->device.bindBufferMemory(result->buffer, result->memory, 0);
+	result->memory = device_data_ptr_->device->allocateMemory(mem_alloc_info);
+	device_data_ptr_->device->bindBufferMemory(result->buffer, result->memory, 0);
 
 	return result;
 }
 
-void rendering_device::update_buffer(const buffer const*, const size_t offset, const size_t size, const void const* data)
+void rendering_device::update_buffer(buffer*, const size_t offset, const size_t size, const void const* data)
 {
 	// TODO: implement updating buffers
 }
 
 void rendering_device::free_buffer(buffer* buffer)
 {
-	device_data_ptr_->device.destroyBuffer(buffer->buffer);
-	device_data_ptr_->device.freeMemory(buffer->memory);
+	device_data_ptr_->device->destroyBuffer(buffer->buffer);
+	device_data_ptr_->device->freeMemory(buffer->memory);
 	delete buffer;
 }
 
@@ -748,7 +980,7 @@ uniform_set* rendering_device::create_uniform_set(std::vector<uniform_info> unif
 		.setPoolSizeCount(desc_pool_sizes.size())
 		.setPPoolSizes(desc_pool_sizes.data());
 
-	vk::UniqueDescriptorPool temp_desc_pool = device_data_ptr_->device.createDescriptorPoolUnique(desc_pool_create_info);
+	vk::UniqueDescriptorPool temp_desc_pool = device_data_ptr_->device->createDescriptorPoolUnique(desc_pool_create_info);
 	device_data_ptr_->desc_pools.push_back(std::move(temp_desc_pool));
 
 	std::vector<vk::DescriptorSetLayoutBinding> layout_bindings;
@@ -772,13 +1004,13 @@ uniform_set* rendering_device::create_uniform_set(std::vector<uniform_info> unif
 	vk::DescriptorSetLayoutCreateInfo layout_create_info = vk::DescriptorSetLayoutCreateInfo()
 		.setBindingCount(layout_bindings.size())
 		.setPBindings(layout_bindings.data());
-	result->desc_set_layout = device_data_ptr_->device.createDescriptorSetLayout(layout_create_info);
+	result->desc_set_layout = device_data_ptr_->device->createDescriptorSetLayout(layout_create_info);
 
 	vk::DescriptorSetAllocateInfo desc_set_alloc_info = vk::DescriptorSetAllocateInfo()
 		.setDescriptorPool(device_data_ptr_->desc_pools.back().get())
 		.setDescriptorSetCount(1)
 		.setPSetLayouts(&result->desc_set_layout);
-	std::vector<vk::DescriptorSet> desc_sets = device_data_ptr_->device.allocateDescriptorSets(desc_set_alloc_info);
+	std::vector<vk::DescriptorSet> desc_sets = device_data_ptr_->device->allocateDescriptorSets(desc_set_alloc_info);
 	result->desc_set = desc_sets[0];
 	result->owning_pool = device_data_ptr_->desc_pools.back().get();
 
@@ -788,50 +1020,292 @@ uniform_set* rendering_device::create_uniform_set(std::vector<uniform_info> unif
 
 void rendering_device::free_uniform_set(uniform_set* uniform_set)
 {
-	device_data_ptr_->device.freeDescriptorSets(uniform_set->owning_pool, uniform_set->desc_set);
-	device_data_ptr_->device.destroyDescriptorSetLayout(uniform_set->desc_set_layout);
+	device_data_ptr_->device->freeDescriptorSets(uniform_set->owning_pool, uniform_set->desc_set);
+	device_data_ptr_->device->destroyDescriptorSetLayout(uniform_set->desc_set_layout);
 	delete uniform_set;
 }
 
-graphics_pipeline* rendering_device::create_graphics_pipeline(std::vector<shader*> shaders, framebuffer_format_id ffid, vertex_format_id vfid, const pipeline_rasterization_state& rasterization_state,
+graphics_pipeline* rendering_device::create_graphics_pipeline(std::vector<shader*> shaders, std::vector<uniform_set*> uniforms, framebuffer_format_id ffid, vertex_format_id vfid, primitive_topology topology, const pipeline_rasterization_state& rasterization_state,
 	const pipeline_multisample_state& multisample_state, const pipeline_depth_stencil_state& depth_stencil_state, const pipeline_color_blend_state& color_blend_state, dynamic_state dynamic_states)
 {
+	const impl_::framebuffer_format& fb_fmt = device_data_ptr_->framebuffer_formats[ffid];
+	const impl_::vertex_format& v_fmt = device_data_ptr_->vertex_formats[vfid];
+	
+	vk::PipelineInputAssemblyStateCreateInfo input_assembly_create_info = vk::PipelineInputAssemblyStateCreateInfo()
+		.setTopology(impl_::topology_list[uint8_t(topology)])
+		.setPrimitiveRestartEnable(topology == primitive_topology::triangle_strips_with_restart_index);
 
+	vk::PipelineViewportStateCreateInfo viewport_state_create_info = vk::PipelineViewportStateCreateInfo()
+		.setViewportCount(1) // TODO: vr
+		.setPViewports(nullptr)
+		.setScissorCount(1)
+		.setPScissors(nullptr);
+
+	vk::CullModeFlags cull_flags = 
+		((uint8_t(rasterization_state.cull_mode) & uint8_t(cull_mode::back_bit)) != 0x00 ? vk::CullModeFlagBits::eBack : vk::CullModeFlagBits::eNone) |
+		((uint8_t(rasterization_state.cull_mode) & uint8_t(cull_mode::front_bit)) != 0x00 ? vk::CullModeFlagBits::eFront : vk::CullModeFlagBits::eNone);
+	vk::PipelineRasterizationStateCreateInfo rasterization_state_create_info = vk::PipelineRasterizationStateCreateInfo()
+		.setDepthClampEnable(rasterization_state.enable_depth_clamp)
+		.setRasterizerDiscardEnable(rasterization_state.enable_rasterizer_discard)
+		.setPolygonMode(rasterization_state.wireframe ? vk::PolygonMode::eLine : vk::PolygonMode::eFill)
+		.setCullMode(cull_flags)
+		.setFrontFace(rasterization_state.front_face == front_face::clockwise ? vk::FrontFace::eClockwise : vk::FrontFace::eCounterClockwise)
+		.setDepthBiasEnable(false);
+		//.setDepthBiasConstantFactor() TODO
+		//.setDepthBiasClamp()
+		//.setDepthBiasSlopeFactor()
+		//.setLineWidth(1.f)
+
+	std::vector<vk::SampleMask> sample_mask;
+	for (uint32_t sample : multisample_state.sample_mask)
+	{
+		sample_mask.push_back(vk::SampleMask(sample));
+	}
+
+	vk::PipelineMultisampleStateCreateInfo multisample_state_create_info = vk::PipelineMultisampleStateCreateInfo()
+		.setRasterizationSamples(impl_::rasterization_sample_count[uint8_t(multisample_state.sample_count)])
+		.setSampleShadingEnable(multisample_state.enable_sample_shading)
+		.setMinSampleShading(multisample_state.min_sample_shading)
+		.setPSampleMask(sample_mask.size() > 0 ? sample_mask.data() : nullptr)
+		.setAlphaToCoverageEnable(multisample_state.enable_alpha_to_coverage)
+		.setAlphaToOneEnable(multisample_state.enable_alpha_to_one);
+
+	vk::PipelineDepthStencilStateCreateInfo depth_stencil_state_create_info = vk::PipelineDepthStencilStateCreateInfo()
+		.setDepthTestEnable(depth_stencil_state.enable_depth_test)
+		.setDepthWriteEnable(depth_stencil_state.enable_depth_write)
+		.setDepthCompareOp(impl_::compare_operators[uint8_t(depth_stencil_state.depth_compare_operator)])
+		.setDepthBoundsTestEnable(depth_stencil_state.enable_depth_range)
+		.setStencilTestEnable(depth_stencil_state.enable_stencil_test)
+		.setFront(vk::StencilOpState())
+		.setBack(vk::StencilOpState())
+		.setMinDepthBounds(depth_stencil_state.min_depth_range)
+		.setMaxDepthBounds(depth_stencil_state.max_depth_range);
+
+	// TODO: blend attachments
+	vk::PipelineColorBlendAttachmentState color_blend_attachment = vk::PipelineColorBlendAttachmentState()
+		.setBlendEnable(true)
+		.setSrcColorBlendFactor(vk::BlendFactor::eSrcAlpha)
+		.setDstColorBlendFactor(vk::BlendFactor::eOneMinusSrcAlpha)
+		.setColorBlendOp(vk::BlendOp::eAdd)
+		.setSrcAlphaBlendFactor(vk::BlendFactor::eOne)
+		.setDstAlphaBlendFactor(vk::BlendFactor::eZero)
+		.setAlphaBlendOp(vk::BlendOp::eAdd);
+
+	vk::PipelineColorBlendStateCreateInfo color_blend_state_create_info = vk::PipelineColorBlendStateCreateInfo()
+		.setLogicOpEnable(color_blend_state.enable_logic_op)
+		.setLogicOp(impl_::logic_operations[uint8_t(color_blend_state.logic_op)])
+		.setAttachmentCount(1)
+		.setPAttachments(&color_blend_attachment)
+		.setBlendConstants({ 0.f, 0.f, 0.f, 0.f });
+
+	std::vector<vk::DynamicState> vk_dynamic_states;
+	vk_dynamic_states.push_back(vk::DynamicState::eViewport);
+	vk_dynamic_states.push_back(vk::DynamicState::eScissor);
+
+	if (uint8_t(dynamic_states) & uint8_t(dynamic_state::line_width))
+	{
+		vk_dynamic_states.push_back(vk::DynamicState::eLineWidth);
+	}
+	if (uint8_t(dynamic_states) & uint8_t(dynamic_state::depth_bias))
+	{
+		vk_dynamic_states.push_back(vk::DynamicState::eDepthBias);
+	}
+	if (uint8_t(dynamic_states) & uint8_t(dynamic_state::blend_constants))
+	{
+		vk_dynamic_states.push_back(vk::DynamicState::eBlendConstants);
+	}
+	if (uint8_t(dynamic_states) & uint8_t(dynamic_state::depth_bounds))
+	{
+		vk_dynamic_states.push_back(vk::DynamicState::eDepthBounds);
+	}
+	if (uint8_t(dynamic_states) & uint8_t(dynamic_state::stencil_compare_mask))
+	{
+		vk_dynamic_states.push_back(vk::DynamicState::eStencilCompareMask);
+	}
+	if (uint8_t(dynamic_states) & uint8_t(dynamic_state::stencil_write_mask))
+	{
+		vk_dynamic_states.push_back(vk::DynamicState::eStencilWriteMask);
+	}
+	if (uint8_t(dynamic_states) & uint8_t(dynamic_state::stencil_reference))
+	{
+		vk_dynamic_states.push_back(vk::DynamicState::eStencilReference);
+	}
+
+	vk::PipelineDynamicStateCreateInfo dynamic_state_create_info = vk::PipelineDynamicStateCreateInfo()
+		.setDynamicStateCount(vk_dynamic_states.size())
+		.setPDynamicStates(vk_dynamic_states.data());
+
+	std::vector<vk::PipelineShaderStageCreateInfo>  vk_shader_stages;
+	for (shader* shader : shaders)
+	{
+		vk_shader_stages.push_back(shader->pipeline_stage_create_info);
+	}
+
+	std::vector<vk::DescriptorSetLayout> set_layouts;
+	for (uniform_set* uniform_set : uniforms)
+	{
+		set_layouts.push_back(uniform_set->desc_set_layout);
+	}
+
+	graphics_pipeline* result = new graphics_pipeline;
+	vk::PipelineLayoutCreateInfo layout_create_info = vk::PipelineLayoutCreateInfo()
+		.setSetLayoutCount(set_layouts.size())
+		.setPSetLayouts(set_layouts.data());
+	result->layout = device_data_ptr_->device->createPipelineLayout(layout_create_info);
+	
+
+	vk::GraphicsPipelineCreateInfo gfx_pipeline_create_info = vk::GraphicsPipelineCreateInfo()
+		.setStageCount(vk_shader_stages.size())
+		.setPStages(vk_shader_stages.data())
+		.setPVertexInputState(&v_fmt.input_state_create_info)
+		.setPInputAssemblyState(&input_assembly_create_info)
+		.setPTessellationState(nullptr) // TODO
+		.setPViewportState(nullptr)
+		.setPRasterizationState(&rasterization_state_create_info)
+		.setPMultisampleState(&multisample_state_create_info)
+		.setPDepthStencilState(&depth_stencil_state_create_info)
+		.setPColorBlendState(&color_blend_state_create_info)
+		.setPDynamicState(&dynamic_state_create_info)
+		.setLayout(result->layout)
+		.setRenderPass(fb_fmt.render_pass)
+		.setSubpass(0)
+		.setBasePipelineHandle(VK_NULL_HANDLE)
+		.setBasePipelineIndex(0);
+
+	result->pipeline = device_data_ptr_->device->createGraphicsPipeline(VK_NULL_HANDLE, gfx_pipeline_create_info);
+	// TODO result->layout = 
+
+	return result;
 }
 
 rendering_device::cmd_buf_id rendering_device::begin_gfx_cmd_buf(const begin_gfx_cmd_buf_params& params)
 {
+	const impl_::framebuffer_format& fb_fmt = device_data_ptr_->framebuffer_formats[params.framebuffer->format_id];
 
+	std::vector<vk::ImageView> attachments;
+	for (texture* tex : params.framebuffer->attachments)
+	{
+		attachments.push_back(tex->image_view);
+	}
+
+	vk::FramebufferCreateInfo framebuffer_create_info = vk::FramebufferCreateInfo()
+		.setRenderPass(fb_fmt.render_pass)
+		.setAttachmentCount(attachments.size())
+		.setPAttachments(attachments.data())
+		.setWidth(params.framebuffer->width)
+		.setHeight(params.framebuffer->height)
+		.setLayers(1);
+
+	device_data_ptr_->frames[device_data_ptr_->frame].bound_framebuffer = device_data_ptr_->device->createFramebuffer(framebuffer_create_info);
+
+	std::vector<vk::ClearValue> clear_values;
+	uint32_t color_idx = 0;
+	for (texture* tex : params.framebuffer->attachments)
+	{
+		vk::ClearValue clear_value;
+		if (color_idx < params.clear_color_values.size() && (uint8_t(tex->create_params.usage) & uint8_t(image_usage::color_attachment_bit)))
+		{
+			const begin_gfx_cmd_buf_params::color& color = params.clear_color_values[color_idx];
+			clear_value.color = vk::ClearColorValue()
+				.setFloat32(color);
+		}
+		else if (uint8_t(tex->create_params.usage) & uint8_t(image_usage::depth_stencil_attachment_bit))
+		{
+			clear_value.depthStencil = vk::ClearDepthStencilValue()
+				.setDepth(params.clear_depth)
+				.setStencil(params.clear_stencil); 
+		}
+		else
+		{
+			clear_value.color = vk::ClearColorValue()
+				.setFloat32({ 0.f, 0.f, 0.f, 0.f });
+		}
+
+		clear_values.push_back(clear_value);
+	}
+
+	// TODO: sampling barrier
+	cmd_buf_id cmd_id = device_data_ptr_->frames[device_data_ptr_->frame].cmd_buf_id;
+	vk::CommandBuffer& cmd_buf = device_data_ptr_->cmd_bufs[cmd_id].get();
+
+	vk::CommandBufferBeginInfo cmd_buf_begin_info = vk::CommandBufferBeginInfo()
+		.setPInheritanceInfo(nullptr);
+	cmd_buf.begin(cmd_buf_begin_info);
+
+	vk::RenderPassBeginInfo render_pass_begin_info = vk::RenderPassBeginInfo()
+		.setRenderPass(fb_fmt.render_pass)
+		.setFramebuffer(device_data_ptr_->frames[device_data_ptr_->frame].bound_framebuffer)
+		.setRenderArea(vk::Rect2D()
+			.setExtent(vk::Extent2D(params.framebuffer->width, params.framebuffer->height))
+			.setOffset(vk::Offset2D())
+		)
+		.setClearValueCount(clear_values.size())
+		.setPClearValues(clear_values.data());
+
+	cmd_buf.beginRenderPass(render_pass_begin_info, vk::SubpassContents::eInline);
+
+	vk::Viewport temp_viewport = vk::Viewport()
+		.setX(0.f)
+		.setY(0.f)
+		.setWidth(params.framebuffer->width)
+		.setHeight(params.framebuffer->height)
+		.setMinDepth(0.f)
+		.setMaxDepth(1.f);
+
+	cmd_buf.setViewport(0, { temp_viewport });
+
+	vk::Rect2D scissor = vk::Rect2D()
+		.setOffset(vk::Offset2D(0, 0))
+		.setExtent(vk::Extent2D(params.framebuffer->width, params.framebuffer->height));
+
+	cmd_buf.setScissor(0, scissor);
+
+	return cmd_id;
 }
 
 void rendering_device::gfx_cmd_buf_bind_pipeline(cmd_buf_id id, graphics_pipeline* pipeline)
 {
-
+	vk::CommandBuffer& cmd_buf = device_data_ptr_->cmd_bufs[id].get();
+	cmd_buf.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline->pipeline);
 }
 
-void rendering_device::gfx_cmd_buf_bind_uniform_set(cmd_buf_id id, uniform_set* uniform_set, uint32_t index)
+void rendering_device::gfx_cmd_buf_bind_uniform_set(cmd_buf_id id, uniform_set* uniform_set, graphics_pipeline* pipeline, uint32_t index)
 {
-
+	vk::CommandBuffer& cmd_buf = device_data_ptr_->cmd_bufs[id].get();
+	cmd_buf.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, pipeline->layout, 0, { uniform_set->desc_set }, { index });
 }
 
 void rendering_device::gfx_cmd_buf_bind_vertex_array(cmd_buf_id id, buffer* vertex_array)
 {
-
+	vk::CommandBuffer& cmd_buf = device_data_ptr_->cmd_bufs[id].get();
+	cmd_buf.bindVertexBuffers(0, { vertex_array->buffer }, { 0 });
 }
 
-void rendering_device::gfx_cmd_buf_bind_index_array(cmd_buf_id id, buffer* index_array)
+void rendering_device::gfx_cmd_buf_bind_index_array(cmd_buf_id id, buffer* index_array, index_type index_type)
 {
-
+	vk::CommandBuffer& cmd_buf = device_data_ptr_->cmd_bufs[id].get();
+	cmd_buf.bindIndexBuffer(index_array->buffer, 0, index_type == index_type::uint16 ? vk::IndexType::eUint16 : vk::IndexType::eUint32);
 }
 
-void rendering_device::gfx_cmd_buf_draw(cmd_buf_id id, bool use_indices, uint32_t instances = 1)
+void rendering_device::gfx_cmd_buf_draw(cmd_buf_id id, bool use_indices, uint32_t element_count, uint32_t instances)
 {
-
+	vk::CommandBuffer& cmd_buf = device_data_ptr_->cmd_bufs[id].get();
+	if (use_indices)
+	{
+		cmd_buf.drawIndexed(element_count, instances, 0, 0, 0);
+	}
+	else
+	{
+		cmd_buf.draw(element_count, instances, 0, 0);
+	}
 }
 
 void rendering_device::gfx_cmd_buf_end(cmd_buf_id id)
 {
-
+	vk::CommandBuffer& cmd_buf = device_data_ptr_->cmd_bufs[id].get();
+	cmd_buf.endRenderPass();
+	cmd_buf.end();
 }
 
 } // namespace rhi
+} // namespace xs
