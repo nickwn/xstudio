@@ -21,3 +21,4 @@ A few of the many issues to be worked through:
  * every eval node stores the index of the particle it is working on
  * no eval synchronization barriers
  * bad math library
+ * sort node data in bfs order
