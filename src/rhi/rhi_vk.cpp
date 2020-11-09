@@ -1,7 +1,11 @@
 #include "rhi.hpp"
 #include "rhi_vk.hpp"
-#include <vulkan/vulkan.hpp>
 #include <vector>
+
+// TODOS:
+// vma, spirv reflection?
+// fix framebuffers
+// resources stored in pools instead of fragmented individually across memory
 
 namespace xs
 {
@@ -26,23 +30,38 @@ namespace impl_
 	struct frame_data
 	{
 		vk::UniqueCommandPool cmd_pool;
-		rendering_device::cmd_buf_id cmd_buf_id;
+		device::cmd_buf_id cmd_buf_id;
 		vk::Framebuffer bound_framebuffer;
+		vk::UniqueSemaphore render_finished_semaphore; // only if surface provided
+		vk::UniqueSemaphore image_available_semaphore; // only if surface provided
+		vk::UniqueFence fence; // only if surface provided
+	};
+
+	struct surface_frame_data
+	{
+		vk::UniqueImageView image_view;
+		vk::UniqueFramebuffer framebuffer;
 	};
 
 	struct device_data
 	{
 		vk::UniqueDevice device;
 		vk::PhysicalDevice physical_device;
+		vk::UniqueSwapchainKHR swapchain; // only set if window is specified in ctor
 		std::vector<framebuffer_format> framebuffer_formats;
 		std::vector<vertex_format> vertex_formats;
 		std::vector<vk::UniqueDescriptorPool> desc_pools; // TODO: pool reference count
 		std::vector<vk::UniqueCommandBuffer> cmd_bufs;
 		std::vector<frame_data> frames;
+		std::vector<surface_frame_data> surface_frame_data; // only if surface provided
 		uint32_t frame;
 		uint32_t gfx_queue_fam_idx;
 		uint32_t compute_queue_fam_idx;
-		uint32_t present_queue_fam_idx;
+		uint32_t present_queue_fam_idx; // only if surface provided
+		format surface_format; // only if surface provided
+		vk::Extent2D surface_extent; // only if surface provided
+		vk::UniqueRenderPass surface_render_pass; // only if surface provided
+		texture* depth_texture; // only if surface provided
 	};
 
 	// public interface objects
@@ -60,7 +79,7 @@ namespace impl_
 
 	struct texture
 	{
-		rendering_device::create_texture_params create_params; // should be on class but am lazy
+		device::create_texture_params create_params; // should be on class but am lazy
 		vk::Image image;
 		vk::ImageView image_view;
 		vk::DeviceMemory memory;
@@ -73,7 +92,7 @@ namespace impl_
 
 	struct framebuffer
 	{
-		rendering_device::framebuffer_format_id format_id;
+		device::framebuffer_format_id format_id;
 		std::vector<texture*> attachments;
 		uint32_t width;
 		uint32_t height;
@@ -83,6 +102,7 @@ namespace impl_
 	{
 		vk::Buffer buffer;
 		vk::DeviceMemory memory;
+		size_t size;
 	};
 
 	struct uniform_set
@@ -93,11 +113,11 @@ namespace impl_
 	};
 
 	const vk::ShaderStageFlagBits shader_stage_bits[] = {
-			vk::ShaderStageFlagBits::eVertex,
-			vk::ShaderStageFlagBits::eFragment,
-			vk::ShaderStageFlagBits::eTessellationControl,
-			vk::ShaderStageFlagBits::eTessellationEvaluation,
-			vk::ShaderStageFlagBits::eCompute,
+		vk::ShaderStageFlagBits::eVertex,
+		vk::ShaderStageFlagBits::eFragment,
+		vk::ShaderStageFlagBits::eTessellationControl,
+		vk::ShaderStageFlagBits::eTessellationEvaluation,
+		vk::ShaderStageFlagBits::eCompute,
 	};
 
     const vk::Format vulkan_formats[] = {
@@ -194,7 +214,8 @@ namespace impl_
         vk::Format::eR64G64B64Sfloat,
         vk::Format::eR64G64B64A64Uint,
         vk::Format::eR64G64B64A64Sint,
-        vk::Format::eR64G64B64A64Sfloat
+        vk::Format::eR64G64B64A64Sfloat,
+		vk::Format::eD32Sfloat
     };
 
 	const vk::CompareOp compare_operators[] = {
@@ -432,6 +453,40 @@ namespace impl_
 			return 0;
 		}
 	}
+	// TODO: for use later, doesn't work
+	vk::SampleCountFlags vulkan_sample_counts(sample_counts scs)
+	{
+		vk::SampleCountFlags res;
+		if (uint8_t(scs) & uint8_t(sample_counts::e1_bit))
+		{
+			res |= vk::SampleCountFlagBits::e1;
+		}
+		if (uint8_t(scs) & uint8_t(sample_counts::e2_bit))
+		{
+			res |= vk::SampleCountFlagBits::e2;
+		}
+		if (uint8_t(scs) & uint8_t(sample_counts::e4_bit))
+		{
+			res |= vk::SampleCountFlagBits::e4;
+		}
+		if (uint8_t(scs) & uint8_t(sample_counts::e8_bit))
+		{
+			res |= vk::SampleCountFlagBits::e8;
+		}
+		if (uint8_t(scs) & uint8_t(sample_counts::e16_bit))
+		{
+			res |= vk::SampleCountFlagBits::e16;
+		}
+		if (uint8_t(scs) & uint8_t(sample_counts::e32_bit))
+		{
+			res |= vk::SampleCountFlagBits::e32;
+		}
+		if (uint8_t(scs) & uint8_t(sample_counts::e64_bit))
+		{
+			res |= vk::SampleCountFlagBits::e64;
+		}
+		return res;
+	}
 
 	// TODO: get_image_format_pixel_size
 
@@ -447,34 +502,30 @@ namespace impl_
 		throw std::runtime_error("failed to find suitable memory type!");
 	}
 
+	vk::Format find_supported_format(const std::vector<vk::Format>& candidates, vk::ImageTiling tiling, vk::FormatFeatureFlags features, vk::PhysicalDevice physical_device)
+	{
+		for (vk::Format format : candidates) 
+		{
+			vk::FormatProperties props = physical_device.getFormatProperties(format);
+
+			if (tiling == vk::ImageTiling::eLinear && (props.linearTilingFeatures & features) == features) 
+			{
+				return format;
+			}
+			else if (tiling == vk::ImageTiling::eOptimal && (props.optimalTilingFeatures & features) == features) 
+			{
+				return format;
+			}
+		}
+
+		throw std::runtime_error("failed to find supported format!");
+	}
+
 } // namespace impl_
 
-rendering_context::rendering_context() : 
-	context_gfx_data_ptr_(std::make_unique<impl_::context_gfx_data>()),
-	context_plat_data_ptr_(std::make_unique<impl_::context_plat_data>()) // potential problem
-{
-	vk::ApplicationInfo app_info = vk::ApplicationInfo()
-		.setPApplicationName("application name")
-		.setApplicationVersion(0)
-		.setPEngineName("!(unity||unreal)")
-		.setEngineVersion(0)
-		.setApiVersion(VK_API_VERSION_1_1);
-
-	static std::vector<const char*> layers = {}; // TODO
-	static std::vector<const char*> extensions = {};
-
-	auto inst_info = vk::InstanceCreateInfo()
-		.setPApplicationInfo(&app_info)
-		.setEnabledLayerCount(layers.size())
-		.setPpEnabledLayerNames(layers.data())
-		.setEnabledExtensionCount(extensions.size())
-		.setPpEnabledExtensionNames(extensions.data());
-
-	context_gfx_data_ptr_->instance = vk::createInstanceUnique(inst_info);
-}
-
-rendering_device::rendering_device(const rendering_context& ctx, rendering_surface* surface)
-	: device_data_ptr_(std::make_unique<impl_::device_data>())
+device::device(const context& ctx, surface* surface) : 
+	std::enable_shared_from_this<device>(),
+	device_data_ptr_(std::make_unique<impl_::device_data>())
 {
 	std::vector<vk::PhysicalDevice> physical_devices = ctx.context_gfx_data_ptr_->instance->enumeratePhysicalDevices();
 	for (const vk::PhysicalDevice& physical_device : physical_devices)
@@ -531,7 +582,7 @@ rendering_device::rendering_device(const rendering_context& ctx, rendering_surfa
 	}
 
 	static std::vector<const char*> layers = {};
-	static std::vector<const char*> extensions = {};
+	static std::vector<const char*> extensions = { VK_KHR_SWAPCHAIN_EXTENSION_NAME };
 
 	vk::DeviceCreateInfo device_create_info = vk::DeviceCreateInfo()
 		.setQueueCreateInfoCount(queue_create_infos.size())
@@ -546,7 +597,169 @@ rendering_device::rendering_device(const rendering_context& ctx, rendering_surfa
 
 	device_data_ptr_->frame = 0;
 
-	const size_t frame_count = surface ? surface->surface_gfx_data_ptr_->swapchain_image_count : 1;
+	vk::Format surface_format;
+	if (surface)
+	{
+		vk::SurfaceCapabilitiesKHR surface_capabilities = device_data_ptr_->physical_device.getSurfaceCapabilitiesKHR(surface->surface_gfx_data_ptr_->surface);
+		std::vector<vk::PresentModeKHR> surface_present_modes = device_data_ptr_->physical_device.getSurfacePresentModesKHR(surface->surface_gfx_data_ptr_->surface);
+		std::vector<vk::SurfaceFormatKHR> formats = device_data_ptr_->physical_device.getSurfaceFormatsKHR(surface->surface_gfx_data_ptr_->surface);
+		
+		if (formats.size() == 1 && formats[0].format == vk::Format::eUndefined) 
+		{
+			surface_format = vk::Format::eB8G8R8A8Unorm;
+		}
+		else 
+		{
+			surface_format = formats[0].format;
+		}
+		
+		// kinda dirty
+		uint8_t idx = 0;
+		for (vk::Format fmt : impl_::vulkan_formats)
+		{
+			if (fmt == surface_format)
+			{
+				device_data_ptr_->surface_format = format(idx);
+			}
+		}
+
+		vk::ColorSpaceKHR surface_color_space = formats[0].colorSpace;
+
+		vk::Extent2D surface_extent = vk::Extent2D(surface->width_, surface->height_);
+		if (surface_capabilities.currentExtent.width != -1)
+		{
+			surface_extent = surface_capabilities.currentExtent;
+		}
+
+		vk::PresentModeKHR present_mode = vk::PresentModeKHR::eFifo;
+		for (auto& pm : surface_present_modes)
+		{
+			if (pm == vk::PresentModeKHR::eMailbox)
+			{
+				present_mode = vk::PresentModeKHR::eMailbox;
+				break;
+			}
+		}
+
+		uint32_t desired_num_swapchain_images = 3;
+		if (desired_num_swapchain_images < surface_capabilities.minImageCount)
+		{
+			desired_num_swapchain_images = surface_capabilities.minImageCount;
+		}
+		if (surface_capabilities.maxImageCount > 0 && desired_num_swapchain_images > surface_capabilities.maxImageCount)
+		{
+			desired_num_swapchain_images = surface_capabilities.maxImageCount;
+		}
+
+		vk::SurfaceTransformFlagBitsKHR pre_transform;
+		if (surface_capabilities.supportedTransforms & vk::SurfaceTransformFlagBitsKHR::eIdentity)
+		{
+			pre_transform = vk::SurfaceTransformFlagBitsKHR::eIdentity;
+		}
+		else
+		{
+			pre_transform = surface_capabilities.currentTransform;
+		}
+
+		vk::CompositeAlphaFlagBitsKHR composite_alpha = vk::CompositeAlphaFlagBitsKHR::eOpaque;
+		vk::CompositeAlphaFlagBitsKHR composite_alpha_flags[4] = {
+			vk::CompositeAlphaFlagBitsKHR::eOpaque,
+			vk::CompositeAlphaFlagBitsKHR::ePreMultiplied,
+			vk::CompositeAlphaFlagBitsKHR::ePostMultiplied,
+			vk::CompositeAlphaFlagBitsKHR::eInherit,
+		};
+		for (uint32_t i = 0; i < sizeof(composite_alpha_flags); i++) {
+			if (surface_capabilities.supportedCompositeAlpha & composite_alpha_flags[i]) {
+				composite_alpha = composite_alpha_flags[i];
+				break;
+			}
+		}
+
+		std::vector<uint32_t> queue_fams = {device_data_ptr_->gfx_queue_fam_idx};
+		if (device_data_ptr_->gfx_queue_fam_idx != device_data_ptr_->present_queue_fam_idx)
+		{
+			queue_fams.push_back(device_data_ptr_->present_queue_fam_idx);
+		}
+
+		vk::SwapchainCreateInfoKHR swapchain_create_info = vk::SwapchainCreateInfoKHR()
+			.setSurface(surface->surface_gfx_data_ptr_->surface)
+			.setMinImageCount(desired_num_swapchain_images)
+			.setImageFormat(surface_format)
+			.setImageColorSpace(surface_color_space)
+			.setImageExtent(surface_extent)
+			.setImageArrayLayers(1)
+			.setImageUsage(vk::ImageUsageFlagBits::eColorAttachment)
+			.setImageSharingMode(vk::SharingMode::eExclusive)
+			.setQueueFamilyIndexCount(queue_fams.size())
+			.setPQueueFamilyIndices(queue_fams.data())
+			.setPreTransform(pre_transform)
+			.setCompositeAlpha(composite_alpha)
+			.setPresentMode(present_mode)
+			.setClipped(true);
+
+		device_data_ptr_->swapchain = device_data_ptr_->device->createSwapchainKHRUnique(swapchain_create_info);
+		device_data_ptr_->surface_extent = surface_extent;
+
+		const static format depth_format = format::D32_sfloat;
+		create_texture_params depth_tex_create_params = {
+			depth_format,
+			surface->width_,
+			surface->height_,
+			1,
+			1,
+			image_type::e2D,
+			sample_counts::e1_bit,
+			image_usage::depth_stencil_attachment_bit,
+			1
+		};
+		device_data_ptr_->depth_texture = create_texture(depth_tex_create_params);
+
+		std::vector<vk::AttachmentReference> color_references = { vk::AttachmentReference(0, vk::ImageLayout::eColorAttachmentOptimal) };
+		vk::AttachmentReference depth_reference = vk::AttachmentReference(1, vk::ImageLayout::eDepthStencilAttachmentOptimal);
+		vk::SubpassDescription subpass = vk::SubpassDescription()
+			.setPipelineBindPoint(vk::PipelineBindPoint::eGraphics)
+			.setInputAttachmentCount(0)
+			.setPInputAttachments(nullptr)
+			.setColorAttachmentCount(color_references.size())
+			.setPColorAttachments(color_references.data())
+			.setPDepthStencilAttachment(&depth_reference)
+			.setPResolveAttachments(nullptr)
+			.setPreserveAttachmentCount(0);
+
+		vk::AttachmentDescription color_attach_desc = vk::AttachmentDescription()
+			.setFormat(surface_format)
+			.setSamples(vk::SampleCountFlagBits::e1)
+			.setLoadOp(vk::AttachmentLoadOp::eClear)
+			.setStoreOp(vk::AttachmentStoreOp::eStore)
+			.setStencilLoadOp(vk::AttachmentLoadOp::eDontCare)
+			.setStencilStoreOp(vk::AttachmentStoreOp::eDontCare)
+			.setInitialLayout(vk::ImageLayout::eUndefined)
+			.setFinalLayout(vk::ImageLayout::ePresentSrcKHR);
+
+		vk::AttachmentDescription depth_attach_desc = vk::AttachmentDescription()
+			.setFormat(impl_::vulkan_formats[uint8_t(depth_format)])
+			.setSamples(vk::SampleCountFlagBits::e1)
+			.setLoadOp(vk::AttachmentLoadOp::eClear)
+			.setStoreOp(vk::AttachmentStoreOp::eDontCare)
+			.setStencilLoadOp(vk::AttachmentLoadOp::eDontCare)
+			.setStencilStoreOp(vk::AttachmentStoreOp::eDontCare)
+			.setInitialLayout(vk::ImageLayout::eUndefined)
+			.setFinalLayout(vk::ImageLayout::eDepthStencilAttachmentOptimal);
+
+		std::vector<vk::AttachmentDescription> attachments = { color_attach_desc, depth_attach_desc	};
+		vk::RenderPassCreateInfo render_pass_create_info = vk::RenderPassCreateInfo()
+			.setAttachmentCount(attachments.size())
+			.setPAttachments(attachments.data())
+			.setSubpassCount(1)
+			.setPSubpasses(&subpass)
+			.setDependencyCount(0)
+			.setPDependencies(nullptr);
+
+		device_data_ptr_->surface_render_pass = device_data_ptr_->device->createRenderPassUnique(render_pass_create_info);
+	}
+
+
+	const size_t frame_count = surface ? device_data_ptr_->device->getSwapchainImagesKHR(device_data_ptr_->swapchain.get()).size() : 1;
 	device_data_ptr_->cmd_bufs.resize(frame_count);
 	device_data_ptr_->frames.resize(frame_count);
 	for (size_t i = 0; i < frame_count; i++)
@@ -564,9 +777,101 @@ rendering_device::rendering_device(const rendering_context& ctx, rendering_surfa
 
 		device_data_ptr_->frames[i].cmd_buf_id = i;
 	}
+
+	if (surface)
+	{
+		device_data_ptr_->surface_frame_data.resize(frame_count);
+		std::vector<vk::Image> swapchain_images = device_data_ptr_->device->getSwapchainImagesKHR(device_data_ptr_->swapchain.get());
+		for (size_t i = 0; i < frame_count; i++)
+		{
+			vk::ImageViewCreateInfo image_view_create_info = vk::ImageViewCreateInfo()
+				.setImage(swapchain_images[i])
+				.setViewType(vk::ImageViewType::e2D)
+				.setFormat(surface_format)
+				.setComponents(vk::ComponentMapping()) // TODO: no swizzling for now
+				.setSubresourceRange(vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1));
+			device_data_ptr_->surface_frame_data[i].image_view = device_data_ptr_->device->createImageViewUnique(image_view_create_info);
+
+			std::vector<vk::ImageView> attachments = { device_data_ptr_->surface_frame_data[i].image_view.get(), device_data_ptr_->depth_texture->image_view };
+
+			vk::FramebufferCreateInfo framebuffer_create_info = vk::FramebufferCreateInfo()
+				.setRenderPass(device_data_ptr_->surface_render_pass.get())
+				.setAttachmentCount(attachments.size())
+				.setPAttachments(attachments.data())
+				.setWidth(device_data_ptr_->surface_extent.width)
+				.setHeight(device_data_ptr_->surface_extent.height)
+				.setLayers(1);
+
+			device_data_ptr_->surface_frame_data[i].framebuffer = device_data_ptr_->device->createFramebufferUnique(framebuffer_create_info);
+
+			vk::SemaphoreCreateInfo semaphore_create_info = vk::SemaphoreCreateInfo();
+			device_data_ptr_->frames[i].render_finished_semaphore = device_data_ptr_->device->createSemaphoreUnique(semaphore_create_info);
+			device_data_ptr_->frames[i].image_available_semaphore = device_data_ptr_->device->createSemaphoreUnique(semaphore_create_info);
+
+			vk::FenceCreateInfo fence_create_info = vk::FenceCreateInfo()
+				.setFlags(vk::FenceCreateFlagBits::eSignaled);
+			device_data_ptr_->frames[i].fence = device_data_ptr_->device->createFenceUnique(fence_create_info);
+		}
+	}
 }
 
-shader* rendering_device::create_shader(const create_shader_params& params)
+device::~device() 
+{
+	free_texture(device_data_ptr_->depth_texture);
+}
+
+
+format device::get_surface_format() const
+{
+	return device_data_ptr_->surface_format;
+}
+
+uint32_t device::get_frame() const
+{
+	return device_data_ptr_->frame;
+}
+
+void device::next_frame()
+{
+	device_data_ptr_->frame = (device_data_ptr_->frame + 1ui32) % static_cast<uint32_t>(device_data_ptr_->frames.size());
+}
+
+void device::swap_buffers()
+{
+	device_data_ptr_->device->waitForFences({ device_data_ptr_->frames[device_data_ptr_->frame].fence.get() }, true, std::numeric_limits<uint64_t>::max());
+	device_data_ptr_->device->resetFences({ device_data_ptr_->frames[device_data_ptr_->frame].fence.get() });
+
+	vk::ResultValue<uint32_t> swapchain_image_idx = device_data_ptr_->device->acquireNextImageKHR(device_data_ptr_->swapchain.get(), std::numeric_limits<uint64_t>::max(),
+		device_data_ptr_->frames[device_data_ptr_->frame].image_available_semaphore.get(), nullptr);
+
+	cmd_buf_id cmd_buf_id = device_data_ptr_->frames[device_data_ptr_->frame].cmd_buf_id;
+	vk::PipelineStageFlags pipeline_stage_flags = vk::PipelineStageFlagBits::eColorAttachmentOutput;
+	vk::SubmitInfo submit_info = vk::SubmitInfo()
+		.setPWaitDstStageMask(&pipeline_stage_flags)
+		.setWaitSemaphoreCount(1)
+		.setPWaitSemaphores(&device_data_ptr_->frames[device_data_ptr_->frame].image_available_semaphore.get())
+		.setCommandBufferCount(1)
+		.setPCommandBuffers(&device_data_ptr_->cmd_bufs[cmd_buf_id].get())
+		.setSignalSemaphoreCount(1)
+		.setPSignalSemaphores(&device_data_ptr_->frames[device_data_ptr_->frame].render_finished_semaphore.get());
+	vk::Queue gfx_submit_queue = device_data_ptr_->device->getQueue(device_data_ptr_->gfx_queue_fam_idx, 0); // TODO: do this in ctor?
+	gfx_submit_queue.submit({ submit_info }, device_data_ptr_->frames[device_data_ptr_->frame].fence.get());
+
+	// TODO: rn assuming present queue and gfx queue are same
+
+	vk::PresentInfoKHR present_info = vk::PresentInfoKHR()
+		.setWaitSemaphoreCount(1)
+		.setPWaitSemaphores(&device_data_ptr_->frames[device_data_ptr_->frame].render_finished_semaphore.get())
+		.setSwapchainCount(1)
+		.setPSwapchains(&device_data_ptr_->swapchain.get())
+		.setPImageIndices(&swapchain_image_idx.value)
+		.setPResults(nullptr);
+
+	vk::Queue present_queue = device_data_ptr_->device->getQueue(device_data_ptr_->present_queue_fam_idx, 0);
+	present_queue.presentKHR(present_info);
+}
+
+shader* device::create_shader(const create_shader_params& params)
 {
 	vk::ShaderModuleCreateInfo shader_module_create_info = vk::ShaderModuleCreateInfo()
 		.setFlags(vk::ShaderModuleCreateFlags())
@@ -585,13 +890,13 @@ shader* rendering_device::create_shader(const create_shader_params& params)
 	return result;
 }
 
-void rendering_device::free_shader(shader* shader)
+void device::free_shader(shader* shader)
 {
 	device_data_ptr_->device->destroyShaderModule(shader->pipeline_stage_create_info.module);
 	delete shader;
 }
 
-texture* rendering_device::create_texture(const create_texture_params& params, std::vector<std::vector<uint8_t>> data)
+texture* device::create_texture(const create_texture_params& params, std::vector<std::vector<uint8_t>> data)
 {
 	vk::ImageFormatListCreateInfo image_format_list_create_info = vk::ImageFormatListCreateInfo();
 	
@@ -641,7 +946,7 @@ texture* rendering_device::create_texture(const create_texture_params& params, s
 	vk::ImageType image_type = impl_::vulkan_image_type[uint8_t(params.type)];
 	vk::Extent3D image_extent = vk::Extent3D(
 		params.width,
-		(image_type == vk::ImageType::e3D || image_type == vk::ImageType::e3D) ? params.height : 1,
+		(image_type == vk::ImageType::e3D || image_type == vk::ImageType::e2D) ? params.height : 1,
 		(image_type == vk::ImageType::e3D) ? params.depth : 1
 	);
 
@@ -701,7 +1006,7 @@ texture* rendering_device::create_texture(const create_texture_params& params, s
 	// TODO: error recovery, barrier to set layer
 }
 
-void rendering_device::free_texture(texture* texture)
+void device::free_texture(texture* texture)
 {
 	device_data_ptr_->device->destroyImageView(texture->image_view);
 	device_data_ptr_->device->freeMemory(texture->memory);
@@ -709,7 +1014,7 @@ void rendering_device::free_texture(texture* texture)
 	delete texture;
 }
 
-rendering_device::framebuffer_format_id rendering_device::create_framebuffer_format(std::vector<attachment_format> formats)
+device::framebuffer_format_id device::create_framebuffer_format(std::vector<attachment_format> formats)
 {
 	std::vector<vk::AttachmentDescription> attachments;
 	std::vector<vk::AttachmentReference> color_references;
@@ -800,7 +1105,7 @@ rendering_device::framebuffer_format_id rendering_device::create_framebuffer_for
 	vk::RenderPass render_pass = device_data_ptr_->device->createRenderPass(render_pass_create_info);
 
 	impl_::framebuffer_format new_format = impl_::framebuffer_format{
-		color_references.size(),
+		static_cast<uint32_t>(color_references.size()),
 		render_pass,
 		formats[0].samples
 	};
@@ -810,7 +1115,7 @@ rendering_device::framebuffer_format_id rendering_device::create_framebuffer_for
 	return format_id;
 }
 
-framebuffer* rendering_device::create_framebuffer(std::vector<texture*> texture_attachments, framebuffer_format_id* format_check)
+framebuffer* device::create_framebuffer(std::vector<texture*> texture_attachments, framebuffer_format_id* format_check)
 {
 	std::vector<attachment_format> attachment_formats;
 	attachment_formats.reserve(texture_attachments.size());
@@ -833,12 +1138,12 @@ framebuffer* rendering_device::create_framebuffer(std::vector<texture*> texture_
 	return result;
 }
 
-void rendering_device::free_framebuffer(framebuffer* framebuffer)
+void device::free_framebuffer(framebuffer* framebuffer)
 {
 	delete framebuffer;
 }
 
-sampler* rendering_device::create_sampler(const create_sampler_params& params)
+sampler* device::create_sampler(const create_sampler_params& params)
 {
 	vk::SamplerCreateInfo sampler_create_info = vk::SamplerCreateInfo()
 		.setMagFilter(params.mag_filter == filter::linear ? vk::Filter::eLinear : vk::Filter::eNearest)
@@ -862,13 +1167,13 @@ sampler* rendering_device::create_sampler(const create_sampler_params& params)
 	return result;
 }
 
-void rendering_device::free_sampler(sampler* sampler)
+void device::free_sampler(sampler* sampler)
 {
 	device_data_ptr_->device->destroySampler(sampler->sampler);
 	delete sampler;
 }
 
-buffer* rendering_device::create_buffer(buffer_type type, const size_t size, const void* data)
+buffer* device::create_buffer(buffer_type type, const size_t size, const void* data)
 {
 	vk::BufferUsageFlags usage_flags = vk::BufferUsageFlags();
 	if(type == buffer_type::vertex)
@@ -890,37 +1195,54 @@ buffer* rendering_device::create_buffer(buffer_type type, const size_t size, con
 		.setSharingMode(vk::SharingMode::eExclusive);
 
 	buffer* result = new buffer;
+	result->size = size;
 	result->buffer = device_data_ptr_->device->createBuffer(buffer_create_info);
 
 	vk::MemoryRequirements mem_requirements = device_data_ptr_->device->getBufferMemoryRequirements(result->buffer);
 
 	vk::MemoryAllocateInfo mem_alloc_info = vk::MemoryAllocateInfo()
 		.setAllocationSize(mem_requirements.size)
-		.setMemoryTypeIndex(impl_::find_memory_type(mem_requirements.memoryTypeBits, vk::MemoryPropertyFlags(), device_data_ptr_->physical_device));
+		.setMemoryTypeIndex(impl_::find_memory_type(mem_requirements.memoryTypeBits, vk::MemoryPropertyFlagBits::eHostVisible, device_data_ptr_->physical_device));
 
 	// TODO: use vma
 	result->memory = device_data_ptr_->device->allocateMemory(mem_alloc_info);
 	device_data_ptr_->device->bindBufferMemory(result->buffer, result->memory, 0);
 
+	if (data)
+	{
+		void* mapped_data = device_data_ptr_->device->mapMemory(result->memory, 0, size);
+		memcpy(mapped_data, data, size);
+		device_data_ptr_->device->unmapMemory(result->memory);
+	}
+
 	return result;
 }
 
-void rendering_device::update_buffer(buffer*, const size_t offset, const size_t size, const void const* data)
+void device::update_buffer(buffer*, const size_t offset, const size_t size, const void const* data)
 {
 	// TODO: implement updating buffers
 }
 
-void rendering_device::free_buffer(buffer* buffer)
+void device::free_buffer(buffer* buffer)
 {
 	device_data_ptr_->device->destroyBuffer(buffer->buffer);
 	device_data_ptr_->device->freeMemory(buffer->memory);
 	delete buffer;
 }
 
-rendering_device::vertex_format_id rendering_device::create_vertex_format(std::vector<vertex_attribute> attributes)
+device::vertex_format_id device::create_vertex_format(std::vector<vertex_attribute> attributes)
 {
-	std::vector<vk::VertexInputBindingDescription> binding_descs = std::vector<vk::VertexInputBindingDescription>(attributes.size());
-	std::vector<vk::VertexInputAttributeDescription> attribute_descs = std::vector<vk::VertexInputAttributeDescription>(attributes.size());
+	impl_::vertex_format new_format = impl_::vertex_format{
+		std::vector<vk::VertexInputBindingDescription>(attributes.size()),
+		std::vector<vk::VertexInputAttributeDescription>(attributes.size()),
+		vk::PipelineVertexInputStateCreateInfo()
+	};
+
+	vertex_format_id format_id = device_data_ptr_->vertex_formats.size();
+	device_data_ptr_->vertex_formats.push_back(std::move(new_format));
+
+	std::vector<vk::VertexInputBindingDescription>& binding_descs = device_data_ptr_->vertex_formats[format_id].bindings;
+	std::vector<vk::VertexInputAttributeDescription>& attribute_descs = device_data_ptr_->vertex_formats[format_id].attributes;
 
 	for (size_t i = 0; i < attributes.size(); i++)
 	{
@@ -933,25 +1255,17 @@ rendering_device::vertex_format_id rendering_device::create_vertex_format(std::v
 		attribute_descs[i].offset = attributes[i].offset;
 	}
 
-	vk::PipelineVertexInputStateCreateInfo input_state_create_info = vk::PipelineVertexInputStateCreateInfo()
+	device_data_ptr_->vertex_formats[format_id].input_state_create_info = vk::PipelineVertexInputStateCreateInfo()
 		.setFlags(vk::PipelineVertexInputStateCreateFlags())
 		.setVertexAttributeDescriptionCount(attribute_descs.size())
-		.setPVertexAttributeDescriptions(attribute_descs.data())
+		.setPVertexAttributeDescriptions(attribute_descs.size() != 0 ? attribute_descs.data() : nullptr)
 		.setVertexBindingDescriptionCount(binding_descs.size())
-		.setPVertexBindingDescriptions(binding_descs.data());
+		.setPVertexBindingDescriptions(binding_descs.size() != 0 ? binding_descs.data() : nullptr);
 
-	impl_::vertex_format new_format = impl_::vertex_format{
-		std::move(binding_descs),
-		std::move(attribute_descs),
-		input_state_create_info
-	};
-
-	vertex_format_id format_id = device_data_ptr_->vertex_formats.size();
-	device_data_ptr_->vertex_formats.push_back(std::move(new_format));
 	return format_id;
 }
 
-uniform_set* rendering_device::create_uniform_set(std::vector<uniform_info> uniform_infos, shader* shader)
+uniform_set* device::create_uniform_set(std::vector<uniform_info> uniform_infos, shader* shader)
 {
 	static constexpr uint32_t max_descriptors_per_pool = 64;
 	
@@ -1014,21 +1328,50 @@ uniform_set* rendering_device::create_uniform_set(std::vector<uniform_info> unif
 	result->desc_set = desc_sets[0];
 	result->owning_pool = device_data_ptr_->desc_pools.back().get();
 
+	std::vector<vk::WriteDescriptorSet> writes;
+	writes.reserve(uniform_infos.size());
+	vk::DescriptorBufferInfo buffer_info;
+	for (const uniform_info& uniform_info : uniform_infos)
+	{
+		vk::WriteDescriptorSet write = vk::WriteDescriptorSet()
+			.setDstSet(result->desc_set)
+			.setDstBinding(uniform_info.binding)
+			.setDstArrayElement(0)
+			.setDescriptorCount(1)
+			.setDescriptorType(impl_::vulkan_uniform_types[uint8_t(uniform_info.type)]);
+
+		if (uniform_info.type == rhi::uniform_type::uniform_buffer)
+		{
+			buffer* buf = std::get<buffer*>(uniform_info.data[0]);
+			buffer_info = vk::DescriptorBufferInfo()
+				.setBuffer(buf->buffer)
+				.setOffset(0)
+				.setRange(buf->size);
+			
+			write.setPBufferInfo(&buffer_info)
+				.setPImageInfo(nullptr)
+				.setPTexelBufferView(nullptr);
+		}
+		// TODO: rest of uniform types
+
+		writes.push_back(write);
+	}
+
+	device_data_ptr_->device->updateDescriptorSets(writes, {});
+
 	return result;
-	// TODO: udpate uniform sets
 }
 
-void rendering_device::free_uniform_set(uniform_set* uniform_set)
+void device::free_uniform_set(uniform_set* uniform_set)
 {
 	device_data_ptr_->device->freeDescriptorSets(uniform_set->owning_pool, uniform_set->desc_set);
 	device_data_ptr_->device->destroyDescriptorSetLayout(uniform_set->desc_set_layout);
 	delete uniform_set;
 }
 
-graphics_pipeline* rendering_device::create_graphics_pipeline(std::vector<shader*> shaders, std::vector<uniform_set*> uniforms, framebuffer_format_id ffid, vertex_format_id vfid, primitive_topology topology, const pipeline_rasterization_state& rasterization_state,
+graphics_pipeline* device::create_graphics_pipeline(std::vector<shader*> shaders, std::vector<uniform_set*> uniforms, framebuffer_format_id ffid, vertex_format_id vfid, primitive_topology topology, const pipeline_rasterization_state& rasterization_state,
 	const pipeline_multisample_state& multisample_state, const pipeline_depth_stencil_state& depth_stencil_state, const pipeline_color_blend_state& color_blend_state, dynamic_state dynamic_states)
 {
-	const impl_::framebuffer_format& fb_fmt = device_data_ptr_->framebuffer_formats[ffid];
 	const impl_::vertex_format& v_fmt = device_data_ptr_->vertex_formats[vfid];
 	
 	vk::PipelineInputAssemblyStateCreateInfo input_assembly_create_info = vk::PipelineInputAssemblyStateCreateInfo()
@@ -1036,7 +1379,7 @@ graphics_pipeline* rendering_device::create_graphics_pipeline(std::vector<shader
 		.setPrimitiveRestartEnable(topology == primitive_topology::triangle_strips_with_restart_index);
 
 	vk::PipelineViewportStateCreateInfo viewport_state_create_info = vk::PipelineViewportStateCreateInfo()
-		.setViewportCount(1) // TODO: vr
+		.setViewportCount(1) 
 		.setPViewports(nullptr)
 		.setScissorCount(1)
 		.setPScissors(nullptr);
@@ -1050,11 +1393,11 @@ graphics_pipeline* rendering_device::create_graphics_pipeline(std::vector<shader
 		.setPolygonMode(rasterization_state.wireframe ? vk::PolygonMode::eLine : vk::PolygonMode::eFill)
 		.setCullMode(cull_flags)
 		.setFrontFace(rasterization_state.front_face == front_face::clockwise ? vk::FrontFace::eClockwise : vk::FrontFace::eCounterClockwise)
-		.setDepthBiasEnable(false);
-		//.setDepthBiasConstantFactor() TODO
-		//.setDepthBiasClamp()
-		//.setDepthBiasSlopeFactor()
-		//.setLineWidth(1.f)
+		.setDepthBiasEnable(false)
+		.setDepthBiasConstantFactor(0.f)
+		.setDepthBiasClamp(0.f)
+		.setDepthBiasSlopeFactor(0.f)
+		.setLineWidth(1.f);
 
 	std::vector<vk::SampleMask> sample_mask;
 	for (uint32_t sample : multisample_state.sample_mask)
@@ -1083,13 +1426,17 @@ graphics_pipeline* rendering_device::create_graphics_pipeline(std::vector<shader
 
 	// TODO: blend attachments
 	vk::PipelineColorBlendAttachmentState color_blend_attachment = vk::PipelineColorBlendAttachmentState()
-		.setBlendEnable(true)
+		.setColorWriteMask(vk::ColorComponentFlagBits::eR | vk::ColorComponentFlagBits::eG |
+			vk::ColorComponentFlagBits::eB | vk::ColorComponentFlagBits::eA)
+		.setBlendEnable(false);
+		//vk::PipelineColorBlendAttachmentState()
+		/*.setBlendEnable(true)
 		.setSrcColorBlendFactor(vk::BlendFactor::eSrcAlpha)
 		.setDstColorBlendFactor(vk::BlendFactor::eOneMinusSrcAlpha)
 		.setColorBlendOp(vk::BlendOp::eAdd)
 		.setSrcAlphaBlendFactor(vk::BlendFactor::eOne)
 		.setDstAlphaBlendFactor(vk::BlendFactor::eZero)
-		.setAlphaBlendOp(vk::BlendOp::eAdd);
+		.setAlphaBlendOp(vk::BlendOp::eAdd);*/
 
 	vk::PipelineColorBlendStateCreateInfo color_blend_state_create_info = vk::PipelineColorBlendStateCreateInfo()
 		.setLogicOpEnable(color_blend_state.enable_logic_op)
@@ -1153,32 +1500,80 @@ graphics_pipeline* rendering_device::create_graphics_pipeline(std::vector<shader
 		.setPSetLayouts(set_layouts.data());
 	result->layout = device_data_ptr_->device->createPipelineLayout(layout_create_info);
 	
-
+	vk::RenderPass render_pass = ffid == surface_ffid ? device_data_ptr_->surface_render_pass.get() : device_data_ptr_->framebuffer_formats[ffid].render_pass;
+	//vk::Extent2D fb_extent = ffid == surface_ffid ? device_data_ptr_->surface_extent : device_data_ptr_->framebuffer_formats[ffid].
 	vk::GraphicsPipelineCreateInfo gfx_pipeline_create_info = vk::GraphicsPipelineCreateInfo()
 		.setStageCount(vk_shader_stages.size())
 		.setPStages(vk_shader_stages.data())
 		.setPVertexInputState(&v_fmt.input_state_create_info)
 		.setPInputAssemblyState(&input_assembly_create_info)
 		.setPTessellationState(nullptr) // TODO
-		.setPViewportState(nullptr)
+		.setPViewportState(&viewport_state_create_info)
 		.setPRasterizationState(&rasterization_state_create_info)
 		.setPMultisampleState(&multisample_state_create_info)
 		.setPDepthStencilState(&depth_stencil_state_create_info)
 		.setPColorBlendState(&color_blend_state_create_info)
 		.setPDynamicState(&dynamic_state_create_info)
 		.setLayout(result->layout)
-		.setRenderPass(fb_fmt.render_pass)
+		.setRenderPass(render_pass)
 		.setSubpass(0)
-		.setBasePipelineHandle(VK_NULL_HANDLE)
+		.setBasePipelineHandle({}) // VK_NULL_HANDLE
 		.setBasePipelineIndex(0);
 
-	result->pipeline = device_data_ptr_->device->createGraphicsPipeline(VK_NULL_HANDLE, gfx_pipeline_create_info);
-	// TODO result->layout = 
+	result->pipeline = vk::Pipeline(device_data_ptr_->device->createGraphicsPipeline({ /*VK_NULL_HANDLE*/ }, gfx_pipeline_create_info));
 
 	return result;
 }
 
-rendering_device::cmd_buf_id rendering_device::begin_gfx_cmd_buf(const begin_gfx_cmd_buf_params& params)
+void device::free_graphics_pipeline(graphics_pipeline* gfx_pipeline)
+{
+	device_data_ptr_->device->destroyPipeline(gfx_pipeline->pipeline);
+	device_data_ptr_->device->destroyPipelineLayout(gfx_pipeline->layout);
+	delete gfx_pipeline;
+}
+
+device::cmd_buf_id device::begin_gfx_cmd_buf_for_surface(const color& clear_color)
+{
+	cmd_buf_id cmd_id = device_data_ptr_->frames[device_data_ptr_->frame].cmd_buf_id;
+	vk::CommandBuffer& cmd_buf = device_data_ptr_->cmd_bufs[cmd_id].get();
+
+	vk::CommandBufferBeginInfo cmd_buf_begin_info = vk::CommandBufferBeginInfo()
+		.setPInheritanceInfo(nullptr);
+	cmd_buf.begin(cmd_buf_begin_info);
+
+	std::vector<vk::ClearValue> clear_values = { vk::ClearColorValue(clear_color), vk::ClearDepthStencilValue(1.f, 0)};
+	vk::RenderPassBeginInfo render_pass_begin_info = vk::RenderPassBeginInfo()
+		.setRenderPass(device_data_ptr_->surface_render_pass.get())
+		.setFramebuffer(device_data_ptr_->surface_frame_data[device_data_ptr_->frame].framebuffer.get())
+		.setRenderArea(vk::Rect2D()
+			.setExtent(device_data_ptr_->surface_extent)
+			.setOffset(vk::Offset2D())
+		)
+		.setClearValueCount(clear_values.size())
+		.setPClearValues(clear_values.data());
+
+	cmd_buf.beginRenderPass(render_pass_begin_info, vk::SubpassContents::eInline);
+
+	vk::Viewport temp_viewport = vk::Viewport()
+		.setX(0.f)
+		.setY(0.f)
+		.setWidth(device_data_ptr_->surface_extent.width)
+		.setHeight(device_data_ptr_->surface_extent.height)
+		.setMinDepth(0.f)
+		.setMaxDepth(1.f);
+
+	cmd_buf.setViewport(0, { temp_viewport });
+
+	vk::Rect2D scissor = vk::Rect2D()
+		.setOffset(vk::Offset2D(0, 0))
+		.setExtent(device_data_ptr_->surface_extent);
+
+	cmd_buf.setScissor(0, scissor);
+
+	return cmd_id;
+}
+
+device::cmd_buf_id device::begin_gfx_cmd_buf(const begin_gfx_cmd_buf_params& params)
 {
 	const impl_::framebuffer_format& fb_fmt = device_data_ptr_->framebuffer_formats[params.framebuffer->format_id];
 
@@ -1205,7 +1600,7 @@ rendering_device::cmd_buf_id rendering_device::begin_gfx_cmd_buf(const begin_gfx
 		vk::ClearValue clear_value;
 		if (color_idx < params.clear_color_values.size() && (uint8_t(tex->create_params.usage) & uint8_t(image_usage::color_attachment_bit)))
 		{
-			const begin_gfx_cmd_buf_params::color& color = params.clear_color_values[color_idx];
+			const color& color = params.clear_color_values[color_idx];
 			clear_value.color = vk::ClearColorValue()
 				.setFloat32(color);
 		}
@@ -1263,31 +1658,31 @@ rendering_device::cmd_buf_id rendering_device::begin_gfx_cmd_buf(const begin_gfx
 	return cmd_id;
 }
 
-void rendering_device::gfx_cmd_buf_bind_pipeline(cmd_buf_id id, graphics_pipeline* pipeline)
+void device::gfx_cmd_buf_bind_pipeline(cmd_buf_id id, graphics_pipeline* pipeline)
 {
 	vk::CommandBuffer& cmd_buf = device_data_ptr_->cmd_bufs[id].get();
 	cmd_buf.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline->pipeline);
 }
 
-void rendering_device::gfx_cmd_buf_bind_uniform_set(cmd_buf_id id, uniform_set* uniform_set, graphics_pipeline* pipeline, uint32_t index)
+void device::gfx_cmd_buf_bind_uniform_set(cmd_buf_id id, uniform_set* uniform_set, graphics_pipeline* pipeline, uint32_t index)
 {
 	vk::CommandBuffer& cmd_buf = device_data_ptr_->cmd_bufs[id].get();
-	cmd_buf.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, pipeline->layout, 0, { uniform_set->desc_set }, { index });
+	cmd_buf.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, pipeline->layout, 0, { uniform_set->desc_set }, { });
 }
 
-void rendering_device::gfx_cmd_buf_bind_vertex_array(cmd_buf_id id, buffer* vertex_array)
+void device::gfx_cmd_buf_bind_vertex_array(cmd_buf_id id, buffer* vertex_array)
 {
 	vk::CommandBuffer& cmd_buf = device_data_ptr_->cmd_bufs[id].get();
 	cmd_buf.bindVertexBuffers(0, { vertex_array->buffer }, { 0 });
 }
 
-void rendering_device::gfx_cmd_buf_bind_index_array(cmd_buf_id id, buffer* index_array, index_type index_type)
+void device::gfx_cmd_buf_bind_index_array(cmd_buf_id id, buffer* index_array, index_type index_type)
 {
 	vk::CommandBuffer& cmd_buf = device_data_ptr_->cmd_bufs[id].get();
 	cmd_buf.bindIndexBuffer(index_array->buffer, 0, index_type == index_type::uint16 ? vk::IndexType::eUint16 : vk::IndexType::eUint32);
 }
 
-void rendering_device::gfx_cmd_buf_draw(cmd_buf_id id, bool use_indices, uint32_t element_count, uint32_t instances)
+void device::gfx_cmd_buf_draw(cmd_buf_id id, bool use_indices, uint32_t element_count, uint32_t instances)
 {
 	vk::CommandBuffer& cmd_buf = device_data_ptr_->cmd_bufs[id].get();
 	if (use_indices)
@@ -1300,7 +1695,7 @@ void rendering_device::gfx_cmd_buf_draw(cmd_buf_id id, bool use_indices, uint32_
 	}
 }
 
-void rendering_device::gfx_cmd_buf_end(cmd_buf_id id)
+void device::gfx_cmd_buf_end(cmd_buf_id id)
 {
 	vk::CommandBuffer& cmd_buf = device_data_ptr_->cmd_bufs[id].get();
 	cmd_buf.endRenderPass();

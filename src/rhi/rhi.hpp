@@ -1,21 +1,35 @@
+#pragma once
+
 #include <vector>
+#include <array>
 #include <string>
 #include <variant>
 #include <memory>
+#include <utility>
 
+// TODO: fix unique ptr strat sometime, each unique ptr has 3 (!) ptrs, one to data, and two for shared_ptr to device
 #define DEFINE_SMART_PTR_METHODS(resource_type) \
-template<typename... Ts> \
-std::unique_ptr<resource_type> create_ ## resource_type ## _unique(Ts... args) \
+struct resource_type ## _deleter \
 { \
-    return std::unique_ptr<resource_type>(create_ ## resource_type(args...), \
-        [device = shared_from_this()](resource_type* ptr){device->free_ ## resource_type(ptr);}); \
+    resource_type ## _deleter() = default; \
+    resource_type ## _deleter(std::shared_ptr<device> device_ptr) : device_ptr_(device_ptr) {} \
+    void operator()(resource_type* ptr) { device_ptr_->free_ ## resource_type(ptr); } \
+    std::shared_ptr<device> device_ptr_; \
+}; \
+template<typename... Ts> \
+std::unique_ptr<resource_type, resource_type ## _deleter> create_ ## resource_type ## _unique(Ts&&... args) \
+{ \
+    return std::unique_ptr<resource_type, resource_type ## _deleter>( \
+        create_ ## resource_type(std::forward<Ts>(args)...), resource_type ## _deleter(shared_from_this())); \
 } \
 template<typename... Ts> \
 std::shared_ptr<resource_type> create_ ## resource_type ## _shared(Ts... args) \
 { \
-    return std::shared_ptr<resource_type>(create_ ## resource_type(args...), \
-        [device = shared_from_this()](resource_type* ptr){device->free_ ## resource_type(ptr);}); \
-}
+    return std::shared_ptr<resource_type>(create_ ## resource_type(std::forward<Ts>(args)...),  \
+        [device = shared_from_this()](resource_type* ptr){device->free_ ## resource_type(ptr); }); \
+} 
+
+// Based off godot's rhi: https://github.com/godotengine/godot/blob/master/servers/rendering/rendering_device.h
 
 namespace xs
 {
@@ -152,7 +166,8 @@ enum class format : uint8_t
     R64G64B64_sfloat,
     R64G64B64A64_uint,
     R64G64B64A64_sint,
-    R64G64B64A64_sfloat
+    R64G64B64A64_sfloat,
+    D32_sfloat,
 };
 
 enum class image_type : uint8_t
@@ -168,13 +183,13 @@ enum class image_type : uint8_t
 
 enum class sample_counts : uint8_t
 {
-    e1_bit = 0x0001,
-    e2_bit = 0x0002,
-    e4_bit = 0x0004,
-    e8_bit = 0x0008,
-    e16_bit = 0x0010,
-    e32_bit = 0x0020,
-    e64_bit = 0x0040
+    e1_bit,
+    e2_bit,
+    e4_bit,
+    e8_bit,
+    e16_bit,
+    e32_bit,
+    e64_bit
 };
 
 enum class image_usage : uint16_t 
@@ -291,13 +306,14 @@ enum class logic_op : uint8_t
 
 enum class dynamic_state : uint8_t
 {
+    none = 0x00,
     line_width = 0x01,
     depth_bias = 0x02,
     blend_constants = 0x04,
     depth_bounds = 0x08,
     stencil_compare_mask = 0x10,
     stencil_write_mask = 0x20,
-    stencil_reference = 0x40
+    stencil_reference = 0x40,
 };
 
 enum class initial_action : uint8_t
@@ -336,37 +352,48 @@ enum class index_type : uint8_t
     uint32
 };
 
-class rendering_context
+class context
 {
 public:
-    rendering_context();
+    context(void* params);
+    ~context();
 
-    friend class rendering_surface;
-    friend class rendering_device;
+    friend class surface;
+    friend class device;
 private:
     std::unique_ptr<impl_::context_gfx_data> context_gfx_data_ptr_;
     std::unique_ptr<impl_::context_plat_data> context_plat_data_ptr_;
 };
 
-class rendering_surface
+class surface
 {
 public:
-    rendering_surface(const rendering_context& ctx, std::wstring name, uint32_t height, uint32_t width);
+    surface(const context& ctx, std::wstring name, uint32_t width, uint32_t height);
+    ~surface();
 
-    friend class rendering_device;
+    inline uint32_t get_width() const { return width_; }
+    inline uint32_t get_height() const { return height_; }
+
+    friend class device;
 private:
-    uint32_t height_;
     uint32_t width_;
+    uint32_t height_;
 
     std::unique_ptr<impl_::surface_gfx_data> surface_gfx_data_ptr_; // Graphics API specific data
     std::unique_ptr<impl_::surface_plat_data> surface_plat_data_ptr_; // platform specific data
 };
 
-class rendering_device : std::enable_shared_from_this<rendering_device>
+class device : public std::enable_shared_from_this<device>
 {
 public:
 
-    rendering_device(const rendering_context& ctx, rendering_surface* surface = nullptr);
+    device(const context& ctx, surface* surface = nullptr);
+    ~device();
+
+    format get_surface_format() const;
+    uint32_t get_frame() const;
+    void next_frame();
+    void swap_buffers();
 
     // Shaders
 
@@ -375,6 +402,7 @@ public:
         shader_stage stage;
         std::string bytecode;
     };
+    [[nodiscard]]
     shader* create_shader(const create_shader_params& params);
     void free_shader(shader* shader);
 
@@ -393,11 +421,12 @@ public:
         uint32_t array_layers;
         // TODO: ctor
     };
+    [[nodiscard]]
     texture* create_texture(const create_texture_params& params, 
         std::vector<std::vector<uint8_t>> data = std::vector<std::vector<uint8_t>>());
     void free_texture(texture* texture);
 
-    // Framebuffers
+    // Framebuffers THESE DO NOT WORK rn
     struct attachment_format
     {
         format format;
@@ -406,7 +435,9 @@ public:
     };
 
     using framebuffer_format_id = uint64_t;
+    static constexpr framebuffer_format_id surface_ffid = -1;
     framebuffer_format_id create_framebuffer_format(std::vector<attachment_format> formats);
+    [[nodiscard]]
     framebuffer* create_framebuffer(std::vector<texture*> texture_attachments, framebuffer_format_id* format_check = nullptr);
     void free_framebuffer(framebuffer* framebuffer);
 
@@ -431,11 +462,13 @@ public:
 
         // TODO: default ctor
     };
+    [[nodiscard]]
     sampler* create_sampler(const create_sampler_params& params);
     void free_sampler(sampler* sampler);
 
     // Buffers
     // TODO: free, custom allocation
+    [[nodiscard]]
     buffer* create_buffer(buffer_type type, const size_t size, const void* data);
     void update_buffer(buffer*, const size_t offset, const size_t size, const void const* data);
     void free_buffer(buffer* buffer);
@@ -464,6 +497,7 @@ public:
         using type_variant = std::variant<sampler*, texture*, buffer*>;
         std::vector<type_variant> data;
     };
+    [[nodiscard]]
     uniform_set* create_uniform_set(std::vector<uniform_info> uniform_infos, shader* shader);
     void free_uniform_set(uniform_set* uniform_set);
 
@@ -515,15 +549,16 @@ public:
         // TODO: ctor
         // TODO: blend attachments
     };
-
+    [[nodiscard]]
     graphics_pipeline* create_graphics_pipeline(std::vector<shader*> shaders, std::vector<uniform_set*> uniforms, framebuffer_format_id ffid, vertex_format_id vfid, primitive_topology topology, const pipeline_rasterization_state& rasterization_state,
         const pipeline_multisample_state& multisample_state, const pipeline_depth_stencil_state& depth_stencil_state, const pipeline_color_blend_state& color_blend_state, dynamic_state dynamic_states);
-
+    void free_graphics_pipeline(graphics_pipeline* gfx_pipeline);
     // TODO: compute pipeline
 
     // TODO: command buffer
 
     using cmd_buf_id = uint64_t;
+    using color = std::array<float, 4>;
     struct begin_gfx_cmd_buf_params
     {
         framebuffer* framebuffer;
@@ -532,12 +567,12 @@ public:
         initial_action initial_depth_action;
         final_action final_depth_action;
         
-        using color = std::array<float, 4>;
         std::vector<color> clear_color_values = std::vector<color>();
         float clear_depth = 1.f;
         uint32_t clear_stencil = 0;
     };
    
+    cmd_buf_id begin_gfx_cmd_buf_for_surface(const color& clear_color = {});
     cmd_buf_id begin_gfx_cmd_buf(const begin_gfx_cmd_buf_params& params);
     void gfx_cmd_buf_bind_pipeline(cmd_buf_id id, graphics_pipeline* pipeline);
     void gfx_cmd_buf_bind_uniform_set(cmd_buf_id id, uniform_set* uniform_set, graphics_pipeline* pipeline, uint32_t index);
@@ -548,11 +583,13 @@ public:
 
     // TODO: compute lists
 
+    DEFINE_SMART_PTR_METHODS(shader);
     DEFINE_SMART_PTR_METHODS(texture);
     DEFINE_SMART_PTR_METHODS(framebuffer);
     DEFINE_SMART_PTR_METHODS(sampler);
     DEFINE_SMART_PTR_METHODS(buffer);
     DEFINE_SMART_PTR_METHODS(uniform_set);
+    DEFINE_SMART_PTR_METHODS(graphics_pipeline);
 
 private:
 

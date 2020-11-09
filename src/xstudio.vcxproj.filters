@@ -25,6 +25,9 @@
     <Filter Include="Header Files\rhi">
       <UniqueIdentifier>{8dd4f832-1dca-4803-99be-0295c9b7df06}</UniqueIdentifier>
     </Filter>
+    <Filter Include="shaders">
+      <UniqueIdentifier>{c6703307-8eef-4917-9869-471b2ea37185}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="..\src\main.cpp">
@@ -39,6 +42,15 @@
     <ClCompile Include="rhi\rhi_vk_win.cpp">
       <Filter>Source Files\rhi</Filter>
     </ClCompile>
+    <ClCompile Include="renderer.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="scene.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="particles.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="meth\meth.hpp">
@@ -50,5 +62,22 @@
     <ClInclude Include="rhi\rhi_vk.hpp">
       <Filter>Header Files\rhi</Filter>
     </ClInclude>
+    <ClInclude Include="renderer.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="scene.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="particles.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="..\shaders\vert.glsl">
+      <Filter>shaders</Filter>
+    </None>
+    <None Include="..\shaders\frag.glsl">
+      <Filter>shaders</Filter>
+    </None>
   </ItemGroup>
 </Project>
