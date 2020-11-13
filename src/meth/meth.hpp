@@ -32,99 +32,99 @@ namespace mth
 			constexpr operator const vreg& () const { return data; }
 		};
 
-		inline vec_base make(const float x)
+		static inline vec_base make(const float x)
 		{
 			return _mm_set1_ps(x);
 		}
 
-		inline vec_base make(const float x, const float y, const float z, const float w)
+		static inline vec_base make(const float x, const float y, const float z, const float w)
 		{
 			return _mm_setr_ps(x, y, z, w);
 		}
 
-		constexpr float& get_comp(const vec_base& vec, const uint32_t idx)
+		static constexpr float& get_comp(const vec_base& vec, const uint32_t idx)
 		{
 			return (((float*)&(vec))[idx]);
 		}
 
-		inline vec_base negate(const vec_base& vec)
+		static inline vec_base negate(const vec_base& vec)
 		{
 			return _mm_sub_ps(_mm_setzero_ps(), vec);
 		}
 
-		inline vec_base add(const vec_base& vec1, const vec_base& vec2)
+		static inline vec_base add(const vec_base& vec1, const vec_base& vec2)
 		{
 			return _mm_add_ps(vec1, vec2);
 		}
 
-		inline vec_base sub(const vec_base& vec1, const vec_base& vec2)
+		static inline vec_base sub(const vec_base& vec1, const vec_base& vec2)
 		{
 			return _mm_sub_ps(vec1, vec2);
 		}
 
-		inline vec_base mul(const vec_base& vec1, const vec_base& vec2)
+		static inline vec_base mul(const vec_base& vec1, const vec_base& vec2)
 		{
 			return _mm_mul_ps(vec1, vec2);
 		}
 
-		inline vec_base div(const vec_base& vec1, const vec_base& vec2)
+		static inline vec_base div(const vec_base& vec1, const vec_base& vec2)
 		{
 			return _mm_div_ps(vec1, vec2);
 		}
 
-		inline vec_base madd(const vec_base& vec1, const vec_base& vec2, const vec_base& vec3)
+		static inline vec_base madd(const vec_base& vec1, const vec_base& vec2, const vec_base& vec3)
 		{
 			return _mm_fmadd_ps(vec1, vec2, vec3);
 		}
 
-		inline vec_base sin(const vec_base& v)
+		static inline vec_base sin(const vec_base& v)
 		{
 			return _mm_sin_ps(v);
 		}
 
-		inline vec_base cos(const vec_base& v)
+		static inline vec_base cos(const vec_base& v)
 		{
 			return _mm_cos_ps(v);
 		}
 
 		// 0xff default param for xyzvecs?
-		inline vec_base dot(const vec_base& vec1, const vec_base& vec2)
+		static inline vec_base dot(const vec_base& vec1, const vec_base& vec2)
 		{
 			return _mm_dp_ps(vec1, vec2, 0xff);
 		}
 
-		inline vec_base sqrt(const vec_base& vec)
+		static inline vec_base sqrt(const vec_base& vec)
 		{
 			return _mm_sqrt_ps(vec);
 		}
 
-		inline vec_base inv_sqrt(const vec_base& vec)
+		static inline vec_base inv_sqrt(const vec_base& vec)
 		{
 			return _mm_rsqrt_ps(vec);
 		}
 
-		inline vec_base inv(const vec_base& vec)
+		static inline vec_base inv(const vec_base& vec)
 		{
 			return _mm_rcp_ps(vec);
 		}
 
-		inline vec_base inv_len(const vec_base& vec)
+		static inline vec_base inv_len(const vec_base& vec)
 		{
 			return inv_sqrt(dot(vec, vec));
 		}
 
-		inline vec_base len(const vec_base& vec)
+		static inline vec_base len(const vec_base& vec)
 		{
 			return sqrt(dot(vec, vec));
 		}
 
-		inline vec_base normalize(const vec_base& vec)
+		static inline vec_base normalize(const vec_base& vec)
 		{
 			return mul(vec, inv_len(vec));
 		}
 
 		// TODO: is this faster than non-fma version?
-		inline vec_base cross_fma(const vec_base& x, const vec_base& y) 
+		static inline vec_base cross_fma(const vec_base& x, const vec_base& y)
 		{
 			const vec_base tmp0 = _mm_shuffle_ps(y, y, _MM_SHUFFLE(3, 0, 2, 1));
 			const vec_base tmp1 = _mm_shuffle_ps(x, x, _MM_SHUFFLE(3, 0, 2, 1));
@@ -196,7 +196,7 @@ namespace mth
 		// from https://gist.github.com/rygorous/4172889
 
 		// dual linear combination using AVX instructions on YMM regs
-		inline __m256 twolincomb_AVX_8(__m256 A01, const mat_base& B)
+		static inline __m256 twolincomb_AVX_8(__m256 A01, const mat_base& B)
 		{
 			__m256 result;
 			result = _mm256_mul_ps(_mm256_shuffle_ps(A01, A01, 0x00), _mm256_broadcast_ps(&B.row[0]));
@@ -208,7 +208,7 @@ namespace mth
 
 		// this should be noticeably faster with actual 256-bit wide vector units (Intel);
 		// not sure about double-pumped 128-bit (AMD), would need to check.
-		inline void matmult_AVX_8(mat_base& out, const mat_base& A, const mat_base& B)
+		static inline void matmult_AVX_8(mat_base& out, const mat_base& A, const mat_base& B)
 		{
 			_mm256_zeroupper();
 			__m256 A01 = _mm256_loadu_ps(&A.m[0][0]);
@@ -332,27 +332,27 @@ namespace mth
 
 	// non-member functions
 
-	inline ndir normalize(const dir& d)
+	static inline ndir normalize(const dir& d)
 	{
 		return ndir(vec_impl::normalize(d));
 	}
 
-	inline float dot(const dir& vec1, const dir& vec2)
+	static inline float dot(const dir& vec1, const dir& vec2)
 	{
 		return vec_impl::get_comp(vec_impl::dot(vec1, vec2), 0);
 	}
 
-	inline dir cross(const dir& dir1, const dir& dir2)
+	static inline dir cross(const dir& dir1, const dir& dir2)
 	{
 		return dir(vec_impl::cross_fma(dir1, dir2));
 	}
 
-	inline float len(const dir& vec)
+	static inline float len(const dir& vec)
 	{
 		return vec_impl::get_comp(vec_impl::len(vec), 0);
 	}
 
-	inline float inv_len(const dir& vec)
+	static inline float inv_len(const dir& vec)
 	{
 		return vec_impl::get_comp(vec_impl::inv_len(vec), 0);
 	}
@@ -397,7 +397,7 @@ namespace mth
 	};
 
 	// TODO: not efficient at all
-	inline quat to_quat(const float angle, const ndir& axis)
+	static inline quat to_quat(const float angle, const ndir& axis)
 	{
 		const float half_alpha = angle * .5f;
 		const vec_impl::vec_base beta = axis;

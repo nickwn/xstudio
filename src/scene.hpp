@@ -42,10 +42,10 @@ struct mesh
 };
 
 template<typename FuncType>
-class function_ref;
+class function_ptr;
 
 template<typename Ret, typename... Params>
-class function_ref<Ret(Params...)>
+class function_ptr<Ret(Params...)>
 {
 private:
 	template<typename Functor, typename FuncType>
@@ -72,7 +72,7 @@ private:
 public:
 
 	template<typename Functor>
-	function_ref(Functor&& functor)
+	function_ptr(Functor&& functor)
 	{
 		using decayed_type = std::decay_t<Functor>;
 
@@ -107,24 +107,26 @@ public:
 	};
 
 	template<typename Functor>
-	inline func_id register_system(Functor&& func)
+	inline func_id register_function(Functor&& func)
 	{
 		const func_id new_id = func_id{ static_cast<uint32_t>(registry_.size()) };
-		registry_.push_back(function_ref<FuncType>(std::forward<Functor>(func)));
+		registry_.push_back(function_ptr<FuncType>(std::forward<Functor>(func)));
 		return new_id;
 	}
 
-	inline const function_ref<FuncType>& operator[](const func_id id) const
+	inline const function_ptr<FuncType>& operator[](const func_id id) const
 	{  
 		return registry_[id.idx];
 	}
 
 private:
-	std::vector<function_ref<FuncType>> registry_;
+	std::vector<function_ptr<FuncType>> registry_;
 };
 
+class scene;
+
 using system_registry = function_registry<void(entt::registry&, entt::entity, entt::entity)>;
-using applicator_registry = function_registry<void(entt::registry&, entt::entity)>;
+using applicator_registry = function_registry<void(scene*, entt::entity)>;
 using system_id = system_registry::func_id;
 using applicator_id = applicator_registry::func_id;
 
@@ -150,6 +152,9 @@ public:
 	const system_registry& get_system_registry() const { return system_registry_; }
 	applicator_registry& get_applicator_registry() { return applicator_registry_; }
 	const applicator_registry& get_applicator_registry() const { return applicator_registry_; }
+
+	const entt::registry& get_node_registry() const { return node_registry_; }
+	entt::registry& get_node_registry() { return node_registry_; }
 
 	void add_draw_item(const draw_item& item) { draw_list_.push_back(item); }
 

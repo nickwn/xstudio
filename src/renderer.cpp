@@ -117,10 +117,16 @@ renderer::renderer(std::shared_ptr<rhi::device> device, std::shared_ptr<scene> s
 		device->gfx_cmd_buf_bind_pipeline(cmd_buf_id, gfx_pipeline_.get());
 		for (const draw_item& item : draw_list) // TODO: indirect draw
 		{
-			device->gfx_cmd_buf_bind_vertex_array(cmd_buf_id, item.device_vertex_buffer);
-			device->gfx_cmd_buf_bind_index_array(cmd_buf_id, item.device_index_buffer, xs::rhi::index_type::uint16);
+			if (item.device_vertex_buffer)
+			{
+				device->gfx_cmd_buf_bind_vertex_array(cmd_buf_id, item.device_vertex_buffer);
+			}
+			if (item.device_index_buffer)
+			{
+				device->gfx_cmd_buf_bind_index_array(cmd_buf_id, item.device_index_buffer, xs::rhi::index_type::uint16);
+			}
 			device->gfx_cmd_buf_bind_uniform_set(cmd_buf_id, uniform_set_.get(), gfx_pipeline_.get(), 0);
-			device->gfx_cmd_buf_draw(cmd_buf_id, true, item.elem_count);
+			device->gfx_cmd_buf_draw(cmd_buf_id, item.device_index_buffer ? true : false, item.elem_count);
 		}
 		device->gfx_cmd_buf_end(cmd_buf_id);
 

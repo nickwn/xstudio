@@ -12,9 +12,13 @@ mesh::mesh(rhi::device* device, std::vector<mth::pos> vertex_buffer_, std::vecto
 	device_index_buffer(),
 	draw_items()
 {
-	device_vertex_buffer = device->create_buffer_unique(xs::rhi::buffer_type::vertex, sizeof(mth::pos) * vertex_buffer.size(), &vertex_buffer[0]);
-	device_index_buffer = device->create_buffer_unique(xs::rhi::buffer_type::index, sizeof(uint16_t) * index_buffer.size(), &index_buffer[0]);
-	draw_items = { draw_item(index_buffer.size(), device_vertex_buffer.get(), device_index_buffer.get()) };
+	device_vertex_buffer = !vertex_buffer.empty() ? 
+		device->create_buffer_unique(xs::rhi::buffer_type::vertex, sizeof(mth::pos) * vertex_buffer.size(), &vertex_buffer[0]) :
+		nullptr;
+	device_index_buffer = !index_buffer.empty() ?
+		device->create_buffer_unique(xs::rhi::buffer_type::index, sizeof(uint16_t) * index_buffer.size(), &index_buffer[0]) :
+		nullptr;
+	draw_items = { draw_item(index_buffer.size() ? index_buffer.size() : vertex_buffer.size() , device_vertex_buffer.get(), device_index_buffer.get()) };
 }
 
 void scene::evaluate()
@@ -46,7 +50,7 @@ void scene::evaluate()
 	// TODO: sort these too
 	const auto applicators = node_registry_.view<applicator_id>();
 	applicators.each([this](const entt::entity node, const applicator_id& aid) {
-		applicator_registry_[aid](node_registry_, node);
+		applicator_registry_[aid](this, node);
 	});
 }
 

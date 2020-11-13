@@ -146,7 +146,7 @@ static inline float pow(float v) {
 template <> float pow<1>(float v) { return v; }
 template <> float pow<0>(float v) { return 1; }
 
-// TODO: pack morton and pressure into the vector registers, remove mass
+// TODO: pack pressure into vel.w
 struct particle
 {
 	mth::pos pos;
@@ -215,44 +215,52 @@ static inline float cubic_kernel(const float q)
 	}
 }
 
-struct particle_system
+class particle_system
 {
-	spatial_hash_table grid;
-
+	// for sampling the kernel function
 	static constexpr size_t num_kernel_samples = 1028;
-	std::array<float, num_kernel_samples> kernel;
-	float inv_h;
-	float inv_h_d;
-	float inv_p0;
-	float k;
-	float dt;
-	float mass;
-
 	static constexpr float min_domain = 2.f;
 	static constexpr float step = min_domain / float(num_kernel_samples - 1);
 	static constexpr float inv_step = 1.f / step;
 	static constexpr float domain = min_domain + step;
 
+public:
 	/*
 	 * h: smoothing length
 	 * p0: resting density
 	 * k: stiffness constant
 	 * dt: time step
 	 */
-	particle_system(const std::vector<particle>& particles, const float h_, const float p0_, const float k_, const float dt_);
+	particle_system(const std::vector<particle>& particles, rhi::device* device, 
+		const float h, const float p0, const float k, const float dt);
 
 	inline float sample_kernel(const float q) const
 	{
-		const size_t idx = (std::min)(size_t(q * inv_step), kernel.size() - 1);
-		return kernel[idx];
+		const size_t idx = (std::min)(size_t(q * inv_step), kernel_.size() - 1);
+		return kernel_[idx];
 	}
 
 	void evaluate_pressure(entt::registry& node_registry, entt::entity cur, entt::entity parent);
 	void evaluate_pressure_force(entt::registry& node_registry, entt::entity cur, entt::entity parent) const;
 	void evaluate_friction_force(entt::registry& node_registry, entt::entity cur, entt::entity parent) const;
 
-	void apply_particle_forces(entt::registry& node_registry, entt::entity cur);
-	// TODO: dampening force	
+	void apply_particle_forces(scene* scene, entt::entity cur);
+	// TODO: dampening force
+
+	const mesh& get_mesh() const { return particle_mesh_; }
+	mesh& get_mesh() { return particle_mesh_; }
+
+private:
+	spatial_hash_table grid_;
+	mesh particle_mesh_; // TODO: make this shared?
+
+	std::array<float, num_kernel_samples> kernel_;
+	float inv_h_;
+	float inv_h_d_;
+	float inv_p0_;
+	float k_;
+	float dt_;
+	float mass_;
 };
 
 } // namespace xs
