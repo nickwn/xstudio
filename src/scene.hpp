@@ -34,6 +34,8 @@ struct mesh
 	mesh() = default;
 	mesh(rhi::device* device, std::vector<mth::pos> vertex_buffer_, std::vector<uint16_t> index_buffer_);
 
+	void upload(rhi::device* device);
+
 	std::vector<mth::pos> vertex_buffer;
 	std::vector<uint16_t> index_buffer;
 	std::unique_ptr<rhi::buffer, rhi::device::buffer_deleter> device_vertex_buffer;

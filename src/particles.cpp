@@ -18,7 +18,7 @@ namespace xs
 		grid_table_.reserve(sorted_elements_.size());
 		for (size_t i = sorted_elements_.size(); i-- > 0;) // can't set i to a potentially negative number in init, so...
 		{
-			const uint32_t hash = hash_coord(sorted_elements_[i].pos);
+			const uint64_t hash = hash_coord(sorted_elements_[i].pos);
 			grid_table_[hash] = i;
 		}
 	}
@@ -36,7 +36,7 @@ namespace xs
 
 		for (size_t i = sorted_elements_.size(); i-- > 0;)
 		{
-			const uint32_t hash = hash_coord(sorted_elements_[i].pos);
+			const uint64_t hash = hash_coord(sorted_elements_[i].pos);
 			grid_table_[hash] = i;
 		}
 	}
@@ -44,12 +44,12 @@ namespace xs
 	std::vector<particle> spatial_hash_table::get_neighbors(const particle& elem) const
 	{
 		// TODO: is this actually faster?
-		const static union { int32_t a[4]; __m128i m; } idx_offsets[] = {
+		const static union { int64_t a[4]; __m256i m; } idx_offsets[] = {
 			{-1, -1, -1, 0}, {0, -1, -1, 0}, {1, -1, -1, 0},
 			{-1,  0, -1, 0}, {0,  0, -1, 0}, {1,  0, -1, 0},
 			{-1,  1, -1, 0}, {0,  1, -1, 0}, {1,  1, -1, 0},
 			{-1, -1,  0, 0}, {0, -1,  0, 0}, {1, -1,  0, 0},
-			{-1,  0,  0, 0}, {0,  0,  0, 0}, {1,  0,  0, 0},
+			{-1,  0,  0, 0}, /*{0,  0,  0, 0},*/ {1,  0,  0, 0},
 			{-1,  1,  0, 0}, {0,  1,  0, 0}, {1,  1,  0, 0},
 			{-1, -1,  1, 0}, {0, -1,  1, 0}, {1, -1,  1, 0},
 			{-1,  0,  1, 0}, {0,  0,  1, 0}, {1,  0,  1, 0},
@@ -61,11 +61,11 @@ namespace xs
 
 		const uint64_t morton = elem.morton;
 
-		for (uint8_t idx_offset = 0; idx_offset < 27; idx_offset++)
+		for (uint8_t idx_offset = 0; idx_offset < 26; idx_offset++)
 		{
 			const uint32_t hash = hash_coord(elem.pos, idx_offsets[idx_offset].m);
 			const auto cell_itr = grid_table_.find(hash);
-			if (cell_itr != std::end(grid_table_))
+			if (cell_itr == std::end(grid_table_))
 			{
 				continue;
 			}
@@ -75,9 +75,12 @@ namespace xs
 			size_t particle_idx = cell_itr->second;
 			do
 			{
-				neighbors.push_back(sorted_elements_[particle_idx]);
+				if (sorted_elements_[particle_idx].morton != elem.morton) // TODO: fix this bug
+				{
+					neighbors.push_back(sorted_elements_[particle_idx]);
+				}
 				particle_idx++;
-			} while (sorted_elements_[particle_idx].morton - morton < max_morton_diff);
+			} while (particle_idx < sorted_elements_.size() && sorted_elements_[particle_idx].morton - morton < max_morton_diff);
 		}
 
 		return neighbors;
@@ -129,7 +132,9 @@ namespace xs
 
 		const float pressure = k_ * (pow<7>(density * inv_p0_) - 1.f);
 
-		node_registry.get<float>(cur) = density;
+		node_registry.emplace_or_replace<std::vector<particle>>(cur, move(neighbors));
+		node_registry.emplace_or_replace<float>(cur, density);
+		node_registry.emplace_or_replace<size_t>(cur, particle_idx);
 		grid_[particle_idx].pressure = pressure;
 	}
 
@@ -137,7 +142,7 @@ namespace xs
 	{
 		const size_t particle_idx = node_registry.get<size_t>(parent);
 		const particle& cur_particle = grid_[particle_idx];
-		std::vector<particle> neighbors = grid_.get_neighbors(grid_[particle_idx]);
+		std::vector<particle> neighbors = node_registry.get<std::vector<particle>>(parent);
 
 		const float density = node_registry.get<float>(parent);
 
@@ -154,15 +159,16 @@ namespace xs
 		const mth::dir force = delta_pressure * (-mass_ / density);
 
 		const mth::dir* maybe_prev_force = node_registry.try_get<mth::dir>(parent);
-		node_registry.get<mth::dir>(cur) = maybe_prev_force ? *maybe_prev_force + force : force;
-		node_registry.get<size_t>(cur) = particle_idx;
+		node_registry.emplace_or_replace<std::vector<particle>>(cur, std::move(neighbors));
+		node_registry.emplace_or_replace<mth::dir>(cur, maybe_prev_force ? *maybe_prev_force + force : force);
+		node_registry.emplace_or_replace<size_t>(cur,  particle_idx);
 	}
 
 	void particle_system::evaluate_friction_force(entt::registry& node_registry, entt::entity cur, entt::entity parent) const
 	{
 		const size_t particle_idx = node_registry.get<size_t>(parent);
 		const particle& cur_particle = grid_[particle_idx];
-		std::vector<particle> neighbors = grid_.get_neighbors(grid_[particle_idx]);
+		std::vector<particle> neighbors = node_registry.get<std::vector<particle>>(parent);
 
 		// TODO: unroll?
 		mth::dir delta_velocity = mth::dir(0.f);
@@ -176,8 +182,9 @@ namespace xs
 		const mth::dir force = (delta_velocity * delta_velocity) * mass_ * cur_particle.vel;
 
 		const mth::dir* maybe_prev_force = node_registry.try_get<mth::dir>(parent);
-		node_registry.get<mth::dir>(cur) = maybe_prev_force ? *maybe_prev_force + force : force;
-		node_registry.get<size_t>(cur) = particle_idx;
+		node_registry.emplace_or_replace<std::vector<particle>>(cur, std::move(neighbors));
+		node_registry.emplace_or_replace<mth::dir>(cur, maybe_prev_force ? *maybe_prev_force + force : force);
+		node_registry.emplace_or_replace<size_t>(cur, particle_idx);
 	}
 
 	void particle_system::apply_particle_forces(scene* scene, entt::entity cur)

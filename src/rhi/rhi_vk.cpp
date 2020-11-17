@@ -1218,9 +1218,12 @@ buffer* device::create_buffer(buffer_type type, const size_t size, const void* d
 	return result;
 }
 
-void device::update_buffer(buffer*, const size_t offset, const size_t size, const void const* data)
+void device::update_buffer(buffer* buf, const size_t offset, const size_t size, const void const* data)
 {
 	// TODO: implement updating buffers
+	void* mapped_data = device_data_ptr_->device->mapMemory(buf->memory, 0, size);
+	memcpy(mapped_data, data, size);
+	device_data_ptr_->device->unmapMemory(buf->memory);
 }
 
 void device::free_buffer(buffer* buffer)

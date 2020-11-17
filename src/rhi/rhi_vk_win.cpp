@@ -126,7 +126,7 @@ context::context(void* params) :
 		.setEngineVersion(0)
 		.setApiVersion(VK_API_VERSION_1_1);
 
-	static std::vector<const char*> layers = { "VK_LAYER_KHRONOS_validation", "VK_LAYER_LUNARG_standard_validation" };
+	static std::vector<const char*> layers = { "VK_LAYER_KHRONOS_validation" };
 	static std::vector<const char*> extensions = { VK_KHR_SURFACE_EXTENSION_NAME, "VK_KHR_win32_surface", 
 		VK_EXT_DEBUG_UTILS_EXTENSION_NAME };
 

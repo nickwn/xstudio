@@ -163,22 +163,26 @@ class spatial_hash_table
 {
 private:
 
-	inline __m128i to_int_space(const mth::pos& p) const
+	inline __m256i to_int_space(const mth::pos& p) const
 	{
-		return _mm_cvtps_epi32(mth::vec_impl::mul(p, inv_cell_size_));
+		return _mm256_cvtepi32_epi64(_mm_cvtps_epi32(mth::vec_impl::mul(p, inv_cell_size_)));
 	}
 
 	inline __m128i to_uint_space(const mth::pos& p) const
 	{
-		const static __m128 sign_flip = _mm_set1_ps(0x80000000);
-		return _mm_cvtps_epi32(_mm_xor_ps(mth::vec_impl::mul(p, inv_cell_size_), sign_flip));
+		const static __m128i sign_flip = _mm_set1_epi32(std::numeric_limits<int32_t>::max());
+		return _mm_add_epi32(_mm_cvtps_epi32(mth::vec_impl::mul(p, inv_cell_size_)), sign_flip);
 	}
 
-	inline uint32_t hash_coord(const mth::pos& p, const __m128i& idx_offset = _mm_set1_epi32(0)) const
+	inline uint64_t hash_coord(const mth::pos& p, const __m256i& idx_offset = _mm256_set1_epi64x(0)) const
 	{
-		static const __m128i magic = _mm_setr_epi32(73856093, 19349663, 83492791, 0);
-		union { __m128i m; int32_t i[4]; } a;
-		a.m = _mm_mul_epi32(_mm_add_epi32(to_int_space(p), idx_offset), magic); // TODO: can I fused multiply-add here
+		static const __m256i magic = _mm256_setr_epi64x(73856093, 19349663, 83492791, 0);
+		//static const __m128i magic = _mm_setr_epi32(0, 83492791, 19349663, 73856093);
+		union { __m256i m; int64_t i[4]; } a;
+		__m256i int_space = to_int_space(p);
+		__m256i added = _mm256_add_epi64(int_space, idx_offset);
+		a.m = _mm256_mul_epi32(added, magic);
+		//a.m = _mm_mul_epi32(_mm_add_epi32(to_int_space(p), idx_offset), magic); // TODO: can I fused multiply-add here
 		return a.i[0] ^ a.i[1] ^ a.i[2];
 	}
 
@@ -195,7 +199,7 @@ public:
 
 	mth::vec_impl::vec_base inv_cell_size_;
 	std::vector<particle> sorted_elements_;
-	std::unordered_map<uint32_t, size_t> grid_table_;
+	std::unordered_map<uint64_t, size_t> grid_table_;
 };
 
 // q in range 0 <= q 
@@ -249,6 +253,9 @@ public:
 
 	const mesh& get_mesh() const { return particle_mesh_; }
 	mesh& get_mesh() { return particle_mesh_; }
+
+	const spatial_hash_table& get_grid() const { return grid_; }
+	spatial_hash_table& get_grid() { return grid_; }
 
 private:
 	spatial_hash_table grid_;

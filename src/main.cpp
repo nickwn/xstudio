@@ -54,7 +54,7 @@ xs::particle_system init_particle_system(const size_t num_particles, float spaci
 	}
 
 	static constexpr float h = .5f; // TODO: set
-	xs::particle_system particle_system = xs::particle_system(particles, device, .5f, .5f, .5f, .5f); // placeholders
+	xs::particle_system particle_system = xs::particle_system(particles, device, spacing, .2f, 1.f, .01f); // placeholders
 	return particle_system;
 }
 
@@ -101,10 +101,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	MSG msg = { };
 	while (GetMessage(&msg, nullptr, 0, 0))
 	{
-		//scene->evaluate();
-
 		renderer->render();
 		device->next_frame();
+
+		scene->evaluate();
+		particle_system.get_mesh().upload(device.get());
+		particle_system.get_grid().optimize();
 
 		TranslateMessage(&msg);
 		DispatchMessage(&msg);

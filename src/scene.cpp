@@ -21,6 +21,19 @@ mesh::mesh(rhi::device* device, std::vector<mth::pos> vertex_buffer_, std::vecto
 	draw_items = { draw_item(index_buffer.size() ? index_buffer.size() : vertex_buffer.size() , device_vertex_buffer.get(), device_index_buffer.get()) };
 }
 
+void mesh::upload(rhi::device* device)
+{
+	if (!vertex_buffer.empty())
+	{
+		device->update_buffer(device_vertex_buffer.get(), 0, sizeof(mth::pos) * vertex_buffer.size(), &vertex_buffer[0]);
+	}
+
+	if (!index_buffer.empty())
+	{
+		device->update_buffer(device_index_buffer.get(), 0, sizeof(uint16_t) * index_buffer.size(), &index_buffer[0]);
+	}
+}
+
 void scene::evaluate()
 {
 	// TODO: iterative sort for cache coherency
