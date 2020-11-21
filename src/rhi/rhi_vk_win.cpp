@@ -38,7 +38,38 @@ namespace impl_
 
 	LRESULT CALLBACK WndProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam)
 	{
-		return DefWindowProc(hWnd, msg, wParam, lParam);
+		static int id_timer = -1;
+
+		switch (msg) {
+		case WM_CREATE:
+			SetTimer(hWnd, id_timer = 1, 10, NULL);
+			break;
+		case WM_DESTROY:
+			KillTimer(hWnd, 1);
+			DestroyWindow(hWnd);
+			PostQuitMessage(0);
+			break;
+		case WM_SIZE:
+			switch (wParam)
+			{
+			case SIZE_MINIMIZED:
+				KillTimer(hWnd, 1);
+				id_timer = -1;
+				break;
+
+			case SIZE_RESTORED:
+			case SIZE_MAXIMIZED:
+				if (id_timer == -1)
+				{
+					SetTimer(hWnd, id_timer = 1, 10, NULL);
+				}
+				break;
+			}
+			return 0L;
+		default:
+			return DefWindowProc(hWnd, msg, wParam, lParam);
+			break;
+		}
 	}
 
 	VKAPI_ATTR vk::Bool32 VKAPI_CALL debugCallback(
@@ -168,12 +199,12 @@ surface::surface(const context& ctx, std::wstring name, uint32_t width, uint32_t
 	wcex.cbClsExtra = 0;
 	wcex.cbWndExtra = 0;
 	wcex.hInstance = hInstance;
-	wcex.hIcon = LoadIcon(hInstance, IDI_APPLICATION);
+	wcex.hIcon = LoadIcon(hInstance, MAKEINTRESOURCE(IDI_APPLICATION));
 	wcex.hCursor = LoadCursor(NULL, IDC_ARROW);
-	wcex.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
+	wcex.hbrBackground = (HBRUSH) GetStockObject(BLACK_BRUSH);
 	wcex.lpszMenuName = NULL;
 	wcex.lpszClassName = app_name;
-	wcex.hIconSm = LoadIcon(wcex.hInstance, IDI_APPLICATION);
+	wcex.hIconSm = LoadIcon(wcex.hInstance, MAKEINTRESOURCE(IDI_APPLICATION));
 
 	if (!RegisterClassEx(&wcex))
 	{
@@ -184,7 +215,7 @@ surface::surface(const context& ctx, std::wstring name, uint32_t width, uint32_t
 	surface_plat_data_ptr_->hwnd = CreateWindow(
 		app_name,
 		name.c_str(),
-		WS_OVERLAPPEDWINDOW,
+		WS_OVERLAPPEDWINDOW | WS_CLIPSIBLINGS | WS_CLIPCHILDREN,
 		CW_USEDEFAULT, CW_USEDEFAULT,
 		width_, height_,
 		NULL,

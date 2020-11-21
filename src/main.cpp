@@ -26,7 +26,7 @@ std::vector<uint16_t> indices = {
 
 xs::particle_system init_particle_system(const size_t num_particles, float spacing, xs::rhi::device* device, std::vector<size_t>& out_particle_idxs)
 {
-	const size_t sqrt_num_particles = std::sqrt(num_particles);
+	const size_t cbrt_num_particles = std::cbrt(num_particles);
 	out_particle_idxs.reserve(num_particles);
 
 	std::vector<xs::particle> particles;
@@ -35,12 +35,13 @@ xs::particle_system init_particle_system(const size_t num_particles, float spaci
 	std::vector<xs::mth::pos> mesh_verts;
 	mesh_verts.reserve(num_particles);
 
-	const xs::mth::pos center = xs::mth::pos::zero;
+	const xs::mth::pos center = xs::mth::pos(0.f, 0.f, 1.f);
 	for (size_t i = 0; i < num_particles; i++)
 	{
-		float x_off = float(i % sqrt_num_particles) * spacing;
-		float y_off = float(i / sqrt_num_particles) * spacing;
-		const xs::mth::dir offset = xs::mth::pos(x_off, y_off, 0.f);
+		float x_off = float(i % cbrt_num_particles) * spacing;
+		float y_off = float(i / cbrt_num_particles % cbrt_num_particles) * spacing;
+		float z_off = float(i / (cbrt_num_particles * cbrt_num_particles)) * spacing;
+		const xs::mth::dir offset = xs::mth::pos(x_off, y_off, z_off);
 		out_particle_idxs.push_back(i);
 		xs::particle temp_particle = xs::particle{
 			center + offset,
@@ -54,7 +55,7 @@ xs::particle_system init_particle_system(const size_t num_particles, float spaci
 	}
 
 	static constexpr float h = .5f; // TODO: set
-	xs::particle_system particle_system = xs::particle_system(particles, device, spacing, .2f, 1.f, .01f); // placeholders
+	xs::particle_system particle_system = xs::particle_system(particles, device, spacing, 10.f, 1.f); // placeholders
 	return particle_system;
 }
 
@@ -68,21 +69,27 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	std::shared_ptr<xs::rhi::device> device = std::make_shared<xs::rhi::device>(ctx, window.get());
 
 	std::vector<size_t> particle_idxs;
-	xs::particle_system particle_system = init_particle_system(100, 0.07f, device.get(), particle_idxs);
+	xs::particle_system particle_system = init_particle_system(125, 0.07f, device.get(), particle_idxs);
 
 	using namespace std::placeholders;  // for _1, _2, _3...
 	std::shared_ptr<xs::scene> scene = std::make_shared<xs::scene>();
 	const xs::system_id eval_pressure_sid = scene->get_system_registry().register_function(
-		std::bind(&xs::particle_system::evaluate_pressure, &particle_system, _1, _2, _3)
+		std::bind(&xs::particle_system::evaluate_pressure, &particle_system, _1)
 	);
 	const xs::system_id eval_pressure_force_sid = scene->get_system_registry().register_function(
-		std::bind(&xs::particle_system::evaluate_pressure_force, &particle_system, _1, _2, _3)
+		std::bind(&xs::particle_system::evaluate_pressure_force, &particle_system, _1)
 	);
 	const xs::system_id eval_friction_force_sid = scene->get_system_registry().register_function(
-		std::bind(&xs::particle_system::evaluate_friction_force, &particle_system, _1, _2, _3)
+		std::bind(&xs::particle_system::evaluate_friction_force, &particle_system, _1)
+	);
+	const xs::system_id eval_gravity_force_sid = scene->get_system_registry().register_function(
+		std::bind(&xs::particle_system::evaluate_gravity_force, &particle_system, _1)
+	);
+	const xs::system_id eval_collision_force_sid = scene->get_system_registry().register_function(
+		std::bind(&xs::particle_system::evaluate_collision_force, &particle_system, _1)
 	);
 	const xs::applicator_id particle_system_aid = scene->get_applicator_registry().register_function(
-		std::bind(&xs::particle_system::apply_particle_forces, &particle_system, _1, _2)
+		std::bind(&xs::particle_system::apply_particle_forces, &particle_system, _1, _2, _3)
 	);
 
 	scene->add_draw_item(particle_system.get_mesh().draw_items.front());
@@ -93,18 +100,25 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	std::vector<entt::entity> source_verts = scene->add_source_nodes(particle_idxs);
 	std::vector<entt::entity> eval_pressure_nodes = scene->add_eval_nodes<int, true>(source_verts, eval_pressure_sid);
 	std::vector<entt::entity> eval_pressure_force_nodes = scene->add_eval_nodes(eval_pressure_nodes, eval_pressure_force_sid);
-	std::vector<entt::entity> eval_friction_force_nodes = scene->add_eval_nodes(eval_pressure_force_nodes, eval_friction_force_sid);
-	scene->assign_node_data(eval_friction_force_nodes, particle_system_aid);
+	//std::vector<entt::entity> eval_friction_force_nodes = scene->add_eval_nodes(eval_pressure_force_nodes, eval_friction_force_sid);
+	std::vector<entt::entity> eval_gravity_force_nodes = scene->add_eval_nodes(eval_pressure_force_nodes, eval_gravity_force_sid);
+	std::vector<entt::entity> eval_collision_force_nodes = scene->add_eval_nodes(eval_gravity_force_nodes, eval_collision_force_sid);
+	scene->assign_node_data(eval_collision_force_nodes, particle_system_aid);
 
 	std::unique_ptr<xs::renderer> renderer = std::make_unique<xs::renderer>(device, scene, window);
 
+	std::chrono::time_point last_eval = std::chrono::steady_clock::now();
+
 	MSG msg = { };
-	while (GetMessage(&msg, nullptr, 0, 0))
+	while (GetMessage(&msg, NULL, 0, 0))
 	{
 		renderer->render();
 		device->next_frame();
 
-		scene->evaluate();
+		std::chrono::time_point cur_time = std::chrono::steady_clock::now();
+		std::chrono::duration<float> dt = cur_time - last_eval;
+		last_eval = cur_time;
+		scene->evaluate(dt.count() * .05f);
 		particle_system.get_mesh().upload(device.get());
 		particle_system.get_grid().optimize();
 

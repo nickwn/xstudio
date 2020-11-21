@@ -22,3 +22,7 @@ A few of the many issues to be worked through:
  * no eval synchronization barriers
  * bad math library
  * sort node data in bfs order
+
+ Here's the current state, the next thing to do is improve the evaluation system because it's embarrassingly slow:
+ 
+ ![test](media/test.gif)

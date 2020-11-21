@@ -42,7 +42,12 @@ namespace mth
 			return _mm_setr_ps(x, y, z, w);
 		}
 
-		static constexpr float& get_comp(const vec_base& vec, const uint32_t idx)
+		static constexpr float& get_comp_ref(vreg& vec, const uint32_t idx)
+		{
+			return (((float*)&(vec))[idx]);
+		}
+
+		static constexpr float get_comp(const vec_base& vec, const uint32_t idx)
 		{
 			return (((float*)&(vec))[idx]);
 		}
@@ -140,9 +145,9 @@ namespace mth
 			inline xyz_vec_base(const float x) : vec_base(make(x)) {}
 			inline xyz_vec_base(const float x, const float y, const float z) : vec_base(make(x, y, z, 0.f)) {}
 
-			constexpr float& x() { return vec_impl::get_comp(data, 0); }
-			constexpr float& y() { return vec_impl::get_comp(data, 1); }
-			constexpr float& z() { return vec_impl::get_comp(data, 2); }
+			constexpr float& x() { return vec_impl::get_comp_ref(data, 0); }
+			constexpr float& y() { return vec_impl::get_comp_ref(data, 1); }
+			constexpr float& z() { return vec_impl::get_comp_ref(data, 2); }
 			constexpr float x() const { return vec_impl::get_comp(data, 0); }
 			constexpr float y() const { return vec_impl::get_comp(data, 1); }
 			constexpr float z() const { return vec_impl::get_comp(data, 2); }
@@ -157,10 +162,10 @@ namespace mth
 			inline xyzw_vec_base(const float x) : vec_base(make(x)) {}
 			inline xyzw_vec_base(const float x, const float y, const float z, float w) : vec_base(make(x, y, z, w)) {}
 
-			constexpr float& x() { return vec_impl::get_comp(data, 0); }
-			constexpr float& y() { return vec_impl::get_comp(data, 1); }
-			constexpr float& z() { return vec_impl::get_comp(data, 2); }
-			constexpr float& w() { return vec_impl::get_comp(data, 3); }
+			constexpr float& x() { return vec_impl::get_comp_ref(data, 0); }
+			constexpr float& y() { return vec_impl::get_comp_ref(data, 1); }
+			constexpr float& z() { return vec_impl::get_comp_ref(data, 2); }
+			constexpr float& w() { return vec_impl::get_comp_ref(data, 3); }
 			constexpr float x() const { return vec_impl::get_comp(data, 0); }
 			constexpr float y() const { return vec_impl::get_comp(data, 1); }
 			constexpr float z() const { return vec_impl::get_comp(data, 2); }
@@ -174,10 +179,10 @@ namespace mth
 			inline rgba_vec_base(const float r) : vec_base(make(r)) {}
 			inline rgba_vec_base(const float r, const float g, const float b, const float a = 1.f) : vec_base(make(r, g, b, a)) {}
 			
-			constexpr float& r() { return vec_impl::get_comp(data, 0); }
-			constexpr float& g() { return vec_impl::get_comp(data, 1); }
-			constexpr float& b() { return vec_impl::get_comp(data, 2); }
-			constexpr float& a() { return vec_impl::get_comp(data, 3); }
+			constexpr float& r() { return vec_impl::get_comp_ref(data, 0); }
+			constexpr float& g() { return vec_impl::get_comp_ref(data, 1); }
+			constexpr float& b() { return vec_impl::get_comp_ref(data, 2); }
+			constexpr float& a() { return vec_impl::get_comp_ref(data, 3); }
 			constexpr float r() const { return vec_impl::get_comp(data, 0); }
 			constexpr float g() const { return vec_impl::get_comp(data, 1); }
 			constexpr float b() const { return vec_impl::get_comp(data, 2); }
@@ -400,11 +405,11 @@ namespace mth
 	static inline quat to_quat(const float angle, const ndir& axis)
 	{
 		const float half_alpha = angle * .5f;
-		const vec_impl::vec_base beta = axis;
-		vec_impl::get_comp(beta, 3) = half_alpha;
+		vec_impl::vec_base beta = axis;
+		vec_impl::get_comp_ref(beta.data, 3) = half_alpha;
 		_mm_shuffle_ps(beta, beta, _MM_SHUFFLE(3, 0, 1, 2));
-		const vec_impl::vec_base sin_half_alpha = vec_impl::make(std::sin(half_alpha));
-		vec_impl::get_comp(sin_half_alpha, 0) = 1.f;
+		vec_impl::vec_base sin_half_alpha = vec_impl::make(std::sin(half_alpha));
+		vec_impl::get_comp_ref(sin_half_alpha.data, 0) = 1.f;
 		const vec_impl::vec_base cos_beta = vec_impl::cos(beta);
 		return quat(vec_impl::mul(sin_half_alpha, cos_beta));
 	}

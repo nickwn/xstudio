@@ -1,5 +1,7 @@
 #include "particles.hpp"
 
+#include <algorithm>
+
 namespace xs
 {
 	spatial_hash_table::spatial_hash_table(const std::vector<particle>& elements, float cell_size) :
@@ -86,7 +88,7 @@ namespace xs
 		return neighbors;
 	}
 
-	particle_system::particle_system(const std::vector<particle>& particles, rhi::device* device, const float h, const float p0, const float k, const float dt) :
+	particle_system::particle_system(const std::vector<particle>& particles, rhi::device* device, const float h, const float p0, const float k) :
 		grid_(particles, h),
 		particle_mesh_(),
 		kernel_(),
@@ -94,7 +96,6 @@ namespace xs
 		inv_h_d_(pow<3>(1.f / h)),
 		inv_p0_(1.f / p0),
 		k_(k),
-		dt_(dt),
 		mass_(pow<3>(h) * p0)
 	{
 		std::vector<mth::pos> verts;
@@ -113,9 +114,9 @@ namespace xs
 		}
 	}
 
-	void particle_system::evaluate_pressure(entt::registry& node_registry, entt::entity cur, entt::entity parent)
+	void particle_system::evaluate_pressure(eval_context& ctx)
 	{
-		const size_t particle_idx = node_registry.get<size_t>(parent);
+		const size_t particle_idx = ctx.node_registry.get<size_t>(ctx.parent);
 		const particle& cur_particle = grid_[particle_idx];
 		std::vector<particle> neighbors = grid_.get_neighbors(grid_[particle_idx]);
 
@@ -132,19 +133,18 @@ namespace xs
 
 		const float pressure = k_ * (pow<7>(density * inv_p0_) - 1.f);
 
-		node_registry.emplace_or_replace<std::vector<particle>>(cur, move(neighbors));
-		node_registry.emplace_or_replace<float>(cur, density);
-		node_registry.emplace_or_replace<size_t>(cur, particle_idx);
+		ctx.node_registry.emplace_or_replace<float>(ctx.cur, density);
+		ctx.node_registry.emplace_or_replace<size_t>(ctx.cur, particle_idx);
 		grid_[particle_idx].pressure = pressure;
 	}
 
-	void particle_system::evaluate_pressure_force(entt::registry& node_registry, entt::entity cur, entt::entity parent) const
+	void particle_system::evaluate_pressure_force(eval_context& ctx) const
 	{
-		const size_t particle_idx = node_registry.get<size_t>(parent);
+		const size_t particle_idx = ctx.node_registry.get<size_t>(ctx.parent);
 		const particle& cur_particle = grid_[particle_idx];
-		std::vector<particle> neighbors = node_registry.get<std::vector<particle>>(parent);
+		std::vector<particle> neighbors = grid_.get_neighbors(grid_[particle_idx]);
 
-		const float density = node_registry.get<float>(parent);
+		const float density = ctx.node_registry.get<float>(ctx.parent);
 
 		// TODO: unroll?
 		mth::dir delta_pressure = mth::dir(0.f);
@@ -152,23 +152,23 @@ namespace xs
 		{
 			const mth::dir dpos = neighbor.pos - cur_particle.pos;
 			const float dpos_inv_mag = mth::inv_len(dpos);
+
 			const float dpressure = neighbor.pressure - cur_particle.pressure;
-			delta_pressure = delta_pressure - dpos * dpressure * dpos_inv_mag;
+			delta_pressure = delta_pressure + dpos * dpressure * dpos_inv_mag;
 		}
 
-		const mth::dir force = delta_pressure * (-mass_ / density);
+		const mth::dir force = std::abs(density) < 0.00001f ? 0.f : delta_pressure * (-mass_ / density);
 
-		const mth::dir* maybe_prev_force = node_registry.try_get<mth::dir>(parent);
-		node_registry.emplace_or_replace<std::vector<particle>>(cur, std::move(neighbors));
-		node_registry.emplace_or_replace<mth::dir>(cur, maybe_prev_force ? *maybe_prev_force + force : force);
-		node_registry.emplace_or_replace<size_t>(cur,  particle_idx);
+		const mth::dir* maybe_prev_force = ctx.node_registry.try_get<mth::dir>(ctx.parent);
+		ctx.node_registry.emplace_or_replace<mth::dir>(ctx.cur, maybe_prev_force ? *maybe_prev_force + force : force);
+		ctx.node_registry.emplace_or_replace<size_t>(ctx.cur,  particle_idx);
 	}
 
-	void particle_system::evaluate_friction_force(entt::registry& node_registry, entt::entity cur, entt::entity parent) const
+	void particle_system::evaluate_friction_force(eval_context& ctx) const
 	{
-		const size_t particle_idx = node_registry.get<size_t>(parent);
+		const size_t particle_idx = ctx.node_registry.get<size_t>(ctx.parent);
 		const particle& cur_particle = grid_[particle_idx];
-		std::vector<particle> neighbors = node_registry.get<std::vector<particle>>(parent);
+		std::vector<particle> neighbors = grid_.get_neighbors(grid_[particle_idx]);
 
 		// TODO: unroll?
 		mth::dir delta_velocity = mth::dir(0.f);
@@ -177,24 +177,57 @@ namespace xs
 			const mth::dir dvel = neighbor.vel - cur_particle.vel;
 			delta_velocity = delta_velocity + dvel;
 		}
-		delta_velocity = delta_velocity / float(neighbors.size());
+		delta_velocity = neighbors.empty() ? mth::dir::zero : delta_velocity / float(neighbors.size());
 
 		const mth::dir force = (delta_velocity * delta_velocity) * mass_ * cur_particle.vel;
 
-		const mth::dir* maybe_prev_force = node_registry.try_get<mth::dir>(parent);
-		node_registry.emplace_or_replace<std::vector<particle>>(cur, std::move(neighbors));
-		node_registry.emplace_or_replace<mth::dir>(cur, maybe_prev_force ? *maybe_prev_force + force : force);
-		node_registry.emplace_or_replace<size_t>(cur, particle_idx);
+		const mth::dir* maybe_prev_force = ctx.node_registry.try_get<mth::dir>(ctx.parent);
+		ctx.node_registry.emplace_or_replace<mth::dir>(ctx.cur, maybe_prev_force ? *maybe_prev_force + force : force);
+		ctx.node_registry.emplace_or_replace<size_t>(ctx.cur, particle_idx);
 	}
 
-	void particle_system::apply_particle_forces(scene* scene, entt::entity cur)
+	void particle_system::evaluate_gravity_force(eval_context& ctx) const
+	{
+		const size_t particle_idx = ctx.node_registry.get<size_t>(ctx.parent);
+
+		// conventional standard value
+		static constexpr float gravity_acc_scalar = 9.80665f;
+		static const mth::dir gravity_acc = mth::dir(0.f, 0.f, -gravity_acc_scalar);
+		const mth::dir gravity_force = gravity_acc * mass_;
+
+		const mth::dir* maybe_prev_force = ctx.node_registry.try_get<mth::dir>(ctx.parent);
+		ctx.node_registry.emplace_or_replace<mth::dir>(ctx.cur, maybe_prev_force ? *maybe_prev_force + gravity_force : gravity_force);
+		ctx.node_registry.emplace_or_replace<size_t>(ctx.cur, particle_idx);
+	}
+
+	void particle_system::evaluate_collision_force(eval_context& ctx)
+	{
+		const size_t particle_idx = ctx.node_registry.get<size_t>(ctx.parent);
+		particle& cur_particle = grid_[particle_idx];
+
+		const mth::dir* maybe_prev_force = ctx.node_registry.try_get<mth::dir>(ctx.parent);
+
+		static constexpr float ground_height = 0.f;
+
+		mth::dir new_force = maybe_prev_force ? *maybe_prev_force : mth::dir::zero;
+		if (cur_particle.pos.z() < ground_height)
+		{
+			cur_particle.vel.z() = 0.f;
+			new_force.z() = 0.f;
+		}
+
+		ctx.node_registry.emplace_or_replace<mth::dir>(ctx.cur, new_force);
+		ctx.node_registry.emplace_or_replace<size_t>(ctx.cur, particle_idx);
+	}
+
+	void particle_system::apply_particle_forces(scene* scene, entt::entity cur, float dt)
 	{
 		const size_t particle_idx = scene->get_node_registry().get<size_t>(cur);
 		particle& cur_particle = grid_[particle_idx];
 		const mth::dir& force = scene->get_node_registry().get<mth::dir>(cur);
 
-		cur_particle.vel = cur_particle.vel + force * dt_ / mass_;
-		cur_particle.pos = cur_particle.pos + cur_particle.vel * dt_;
+		cur_particle.vel = cur_particle.vel + force * dt / mass_;
+		cur_particle.pos = cur_particle.pos + cur_particle.vel * dt;
 		
 		// This is kind of sketch for triangle meshes since the particles could be re-ordered every iteration
 		// but one problem at a time

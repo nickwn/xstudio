@@ -138,7 +138,7 @@ static inline uint64_t morton_encode(uint32_t x, uint32_t y, uint32_t z){
 
 // from pbrt
 template <int n>
-static inline float pow(float v) {
+static constexpr float pow(float v) {
 	static_assert(n > 0, "Power can’t be negative");
 	float n2 = pow<n / 2>(v);
 	return n2 * n2 * pow<n & 1>(v);
@@ -236,7 +236,7 @@ public:
 	 * dt: time step
 	 */
 	particle_system(const std::vector<particle>& particles, rhi::device* device, 
-		const float h, const float p0, const float k, const float dt);
+		const float h, const float p0, const float k);
 
 	inline float sample_kernel(const float q) const
 	{
@@ -244,11 +244,13 @@ public:
 		return kernel_[idx];
 	}
 
-	void evaluate_pressure(entt::registry& node_registry, entt::entity cur, entt::entity parent);
-	void evaluate_pressure_force(entt::registry& node_registry, entt::entity cur, entt::entity parent) const;
-	void evaluate_friction_force(entt::registry& node_registry, entt::entity cur, entt::entity parent) const;
+	void evaluate_pressure(eval_context& ctx);
+	void evaluate_pressure_force(eval_context& ctx) const;
+	void evaluate_friction_force(eval_context& ctx) const;
+	void evaluate_gravity_force(eval_context& ctx) const;
+	void evaluate_collision_force(eval_context& ctx);
 
-	void apply_particle_forces(scene* scene, entt::entity cur);
+	void apply_particle_forces(scene* scene, entt::entity cur, float dt);
 	// TODO: dampening force
 
 	const mesh& get_mesh() const { return particle_mesh_; }
@@ -266,7 +268,6 @@ private:
 	float inv_h_d_;
 	float inv_p0_;
 	float k_;
-	float dt_;
 	float mass_;
 };
 

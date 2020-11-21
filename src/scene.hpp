@@ -43,6 +43,14 @@ struct mesh
 	std::vector<draw_item> draw_items;
 };
 
+struct eval_context
+{
+	entt::registry& node_registry;
+	entt::entity cur;
+	entt::entity parent;
+	float dt;
+};
+
 template<typename FuncType>
 class function_ptr;
 
@@ -127,8 +135,8 @@ private:
 
 class scene;
 
-using system_registry = function_registry<void(entt::registry&, entt::entity, entt::entity)>;
-using applicator_registry = function_registry<void(scene*, entt::entity)>;
+using system_registry = function_registry<void(eval_context&)>;
+using applicator_registry = function_registry<void(scene*, entt::entity, float)>;
 using system_id = system_registry::func_id;
 using applicator_id = applicator_registry::func_id;
 
@@ -254,7 +262,7 @@ public:
 		return new_entities;
 	}
 
-	void evaluate();
+	void evaluate(const float dt);
 
 private:
 	std::vector<draw_item> draw_list_;

@@ -34,7 +34,7 @@ void mesh::upload(rhi::device* device)
 	}
 }
 
-void scene::evaluate()
+void scene::evaluate(const float dt)
 {
 	// TODO: iterative sort for cache coherency
 
@@ -48,7 +48,8 @@ void scene::evaluate()
 	{
 		const entt::entity cur = bfs_queue.front();
 		const eval_item& item = node_registry_.get<eval_item>(cur);
-		system_registry_[item.system](node_registry_, cur, item.parent);
+		eval_context cur_ctx = eval_context{ node_registry_, cur, item.parent, dt };
+		system_registry_[item.system](cur_ctx);
 
 		entt::entity child_itr = item.first;
 		while (child_itr != entt::null)
@@ -62,8 +63,8 @@ void scene::evaluate()
 
 	// TODO: sort these too
 	const auto applicators = node_registry_.view<applicator_id>();
-	applicators.each([this](const entt::entity node, const applicator_id& aid) {
-		applicator_registry_[aid](this, node);
+	applicators.each([this, dt](const entt::entity node, const applicator_id& aid) {
+		applicator_registry_[aid](this, node, dt);
 	});
 }
 
