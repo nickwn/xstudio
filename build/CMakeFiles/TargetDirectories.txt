@@ -1,0 +1,6 @@
+C:/Users/nick/source/repos/xstudio/build/CMakeFiles/intrinsics_gen.dir
+C:/Users/nick/source/repos/xstudio/build/CMakeFiles/omp_gen.dir
+C:/Users/nick/source/repos/xstudio/build/CMakeFiles/acc_gen.dir
+C:/Users/nick/source/repos/xstudio/build/CMakeFiles/xstudio.dir
+C:/Users/nick/source/repos/xstudio/build/CMakeFiles/ALL_BUILD.dir
+C:/Users/nick/source/repos/xstudio/build/CMakeFiles/ZERO_CHECK.dir

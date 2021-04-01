@@ -28,6 +28,12 @@
     <Filter Include="shaders">
       <UniqueIdentifier>{c6703307-8eef-4917-9869-471b2ea37185}</UniqueIdentifier>
     </Filter>
+    <Filter Include="Header Files\deps">
+      <UniqueIdentifier>{1705a373-a6c5-445a-aa98-5949122b12b0}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="Source Files\deps">
+      <UniqueIdentifier>{956601e3-c629-4da7-8240-2718947a6442}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="..\src\main.cpp">
@@ -48,7 +54,19 @@
     <ClCompile Include="scene.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="particles.cpp">
+    <ClCompile Include="..\deps\SPIRV-Reflect\spirv_reflect.c">
+      <Filter>Source Files\deps</Filter>
+    </ClCompile>
+    <ClCompile Include="skel.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="draw_item.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="asset_loaders.cpp">
+      <Filter>Source Files</Filter>
+    </ClCompile>
+    <ClCompile Include="sim.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>
@@ -68,8 +86,23 @@
     <ClInclude Include="scene.hpp">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="particles.hpp">
+    <ClInclude Include="..\deps\SPIRV-Reflect\spirv_reflect.h">
+      <Filter>Header Files\deps</Filter>
+    </ClInclude>
+    <ClInclude Include="skel.hpp">
       <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="draw_item.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="asset_loaders.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="sim.hpp">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="meth\pcg32.hpp">
+      <Filter>Header Files\meth</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
@@ -79,5 +112,29 @@
     <None Include="..\shaders\frag.glsl">
       <Filter>shaders</Filter>
     </None>
+    <None Include="..\shaders\vert_skin.glsl">
+      <Filter>shaders</Filter>
+    </None>
+    <None Include="..\shaders\frag_skin.glsl">
+      <Filter>shaders</Filter>
+    </None>
+    <None Include="..\shaders\frag_mpm.glsl">
+      <Filter>shaders</Filter>
+    </None>
+    <None Include="..\shaders\geom_mpm.glsl">
+      <Filter>shaders</Filter>
+    </None>
+    <None Include="..\shaders\vert_mpm.glsl">
+      <Filter>shaders</Filter>
+    </None>
+    <None Include="..\shaders\vert_sph.glsl">
+      <Filter>shaders</Filter>
+    </None>
+    <None Include="..\shaders\frag_sph.glsl">
+      <Filter>shaders</Filter>
+    </None>
+  </ItemGroup>
+  <ItemGroup>
+    <Natvis Include="NatvisFile.natvis" />
   </ItemGroup>
 </Project>

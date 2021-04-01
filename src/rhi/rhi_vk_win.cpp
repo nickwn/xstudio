@@ -4,6 +4,7 @@
 
 #include <iostream>
 
+#define NOMINMAX
 #include <Windows.h>
 #include <fcntl.h>
 #include <io.h>
@@ -40,9 +41,40 @@ namespace impl_
 	{
 		static int id_timer = -1;
 
+		surface* p_this = nullptr;
+
+		if (msg == WM_NCCREATE)
+		{
+			p_this = static_cast<surface*>(reinterpret_cast<CREATESTRUCT*>(lParam)->lpCreateParams);
+			SetLastError(0);
+			if (!SetWindowLongPtr(hWnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(p_this)))
+			{
+				if (GetLastError() != 0)
+				{
+					return FALSE;
+				}
+			}
+		}
+		else
+		{
+			p_this = reinterpret_cast<surface*>(GetWindowLongPtr(hWnd, GWLP_USERDATA));
+		}
+
 		switch (msg) {
 		case WM_CREATE:
 			SetTimer(hWnd, id_timer = 1, 10, NULL);
+			break;
+		case WM_MOUSEWHEEL:
+			for (const auto& cb : p_this->scroll_callbacks_)
+			{
+				cb(GET_WHEEL_DELTA_WPARAM(wParam));
+			}
+			break;
+		case WM_KEYDOWN:
+			for (const auto& cb : p_this->key_callbacks_)
+			{
+				cb(wParam);
+			}
 			break;
 		case WM_DESTROY:
 			KillTimer(hWnd, 1);
@@ -183,7 +215,12 @@ context::context(void* params) :
 
 context::~context() {}
 
-surface::surface(const context& ctx, std::wstring name, uint32_t width, uint32_t height) :
+void context::log(std::string_view str)
+{
+	_RPT0(_CRT_WARN, str.data());
+}
+
+surface::surface(const context& ctx, std::wstring name, std::uint32_t width, std::uint32_t height) :
     width_(width),
     height_(height),
     surface_gfx_data_ptr_(std::make_unique<impl_::surface_gfx_data>()),
@@ -221,7 +258,7 @@ surface::surface(const context& ctx, std::wstring name, uint32_t width, uint32_t
 		NULL,
 		NULL,
 		hInstance,
-		NULL
+		reinterpret_cast<LPVOID>(this)
 	);
 
 	if (!surface_plat_data_ptr_->hwnd)

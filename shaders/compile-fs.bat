@@ -1,1 +1,1 @@
-C:\VulkanSDK\1.2.141.2\Bin\glslc.exe -fshader-stage=frag -o spirv/%1.spv %1.glsl
+C:\VulkanSDK\1.2.162.1\Bin\glslc.exe -fshader-stage=frag -o spirv/%1.spv %1.glsl

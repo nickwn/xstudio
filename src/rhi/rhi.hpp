@@ -5,29 +5,37 @@
 #include <string>
 #include <variant>
 #include <memory>
+#include <functional>
 #include <utility>
 
 // TODO: fix unique ptr strat sometime, each unique ptr has 3 (!) ptrs, one to data, and two for shared_ptr to device
-#define DEFINE_SMART_PTR_METHODS(resource_type) \
-struct resource_type ## _deleter \
+#define DEFINE_SMART_PTR_DELETER(resource_type) \
+template<> \
+struct deleter<resource_type> \
 { \
-    resource_type ## _deleter() = default; \
-    resource_type ## _deleter(std::shared_ptr<device> device_ptr) : device_ptr_(device_ptr) {} \
+    deleter() = default; \
+    deleter(std::shared_ptr<device> device_ptr) : device_ptr_(device_ptr) {} \
     void operator()(resource_type* ptr) { device_ptr_->free_ ## resource_type(ptr); } \
     std::shared_ptr<device> device_ptr_; \
-}; \
+};
+
+#define DEFINE_SMART_PTR_METHODS(resource_type) \
 template<typename... Ts> \
-std::unique_ptr<resource_type, resource_type ## _deleter> create_ ## resource_type ## _unique(Ts&&... args) \
+std::unique_ptr<resource_type, deleter<resource_type>> create_ ## resource_type ## _unique(Ts&&... args) \
 { \
-    return std::unique_ptr<resource_type, resource_type ## _deleter>( \
-        create_ ## resource_type(std::forward<Ts>(args)...), resource_type ## _deleter(shared_from_this())); \
+    return std::unique_ptr<resource_type, deleter<resource_type>>( \
+        create_ ## resource_type(std::forward<Ts>(args)...), deleter<resource_type>(shared_from_this())); \
 } \
 template<typename... Ts> \
 std::shared_ptr<resource_type> create_ ## resource_type ## _shared(Ts... args) \
 { \
     return std::shared_ptr<resource_type>(create_ ## resource_type(std::forward<Ts>(args)...),  \
         [device = shared_from_this()](resource_type* ptr){device->free_ ## resource_type(ptr); }); \
-} 
+}
+
+#define DEFINE_SMART_PTR(resource_type) \
+DEFINE_SMART_PTR_DELETER(resource_type) \
+DEFINE_SMART_PTR_METHODS(resource_type)
 
 // Based off godot's rhi: https://github.com/godotengine/godot/blob/master/servers/rendering/rendering_device.h
 
@@ -46,7 +54,7 @@ namespace impl_
     struct device_data;
 
     struct shader;
-    struct graphics_pipeline;
+    struct pipeline;
     struct texture;
     struct sampler;
     struct framebuffer;
@@ -55,23 +63,27 @@ namespace impl_
 }
 
 using shader = impl_::shader;
-using graphics_pipeline = impl_::graphics_pipeline;
+using pipeline = impl_::pipeline;
 using texture = impl_::texture;
 using sampler = impl_::sampler;
 using framebuffer = impl_::framebuffer;
 using buffer = impl_::buffer;
 using uniform_set = impl_::uniform_set;
 
-enum class shader_stage : uint8_t
+using graphics_pipeline = pipeline;
+using compute_pipeline = pipeline;
+
+enum class shader_stage : std::uint8_t
 {
 	vertex,
 	fragment,
+    geometry,
 	tesselation_control,
 	tesselation_evaluation,
 	compute
 };
 
-enum class format : uint8_t
+enum class format : std::uint8_t
 {
     R8_unorm,
     R8_snorm,
@@ -170,7 +182,7 @@ enum class format : uint8_t
     D32_sfloat,
 };
 
-enum class image_type : uint8_t
+enum class image_type : std::uint8_t
 {
     e1D,
     e2D,
@@ -181,7 +193,7 @@ enum class image_type : uint8_t
     cube_array
 };
 
-enum class sample_counts : uint8_t
+enum class sample_counts : std::uint8_t
 {
     e1_bit,
     e2_bit,
@@ -205,13 +217,13 @@ enum class image_usage : uint16_t
     resolve_attachment_bit = 0x0100
 };
 
-enum class filter : uint8_t
+enum class filter : std::uint8_t
 {
     nearest,
     linear
 };
 
-enum class sampler_address_mode : uint8_t
+enum class sampler_address_mode : std::uint8_t
 {
     repeat,
     mirrored_repeat,
@@ -219,14 +231,15 @@ enum class sampler_address_mode : uint8_t
     clamp_to_border
 };
 
-enum class buffer_type : uint8_t
+enum class buffer_type : std::uint8_t
 {
     vertex,
     index,
     uniform,
+    storage
 };
 
-enum class compare_op : uint8_t
+enum class compare_op : std::uint8_t
 {
     never,
     less,
@@ -238,7 +251,39 @@ enum class compare_op : uint8_t
     always
 };
 
-enum class sampler_border_color : uint8_t
+enum class blend_factor : std::uint8_t
+{
+    zero,
+    one,
+    src_color,
+    one_minus_src_color,
+    dst_color,
+    one_minus_dst_color,
+    src_alpha,
+    one_minus_src_alpha,
+    dst_alpha,
+    one_minus_dst_alpha,
+    constant_color,
+    one_minus_constant_color,
+    constant_alpha,
+    one_minus_constant_alpha,
+    src_alpha_saturate,
+    src1_color,
+    one_minus_src1_color,
+    src1_alpha,
+    one_minus_src1_alpha,
+};
+
+enum class blend_op : std::uint8_t
+{
+    add,
+    subtract,
+    reverse_subtract,
+    min,
+    max,
+};
+
+enum class sampler_border_color : std::uint8_t
 {
     float_transparent_black,
     int_transparent_black,
@@ -248,13 +293,13 @@ enum class sampler_border_color : uint8_t
     int_opaque_white
 };
 
-enum class vertex_input_rate : uint8_t
+enum class vertex_input_rate : std::uint8_t
 {
     vertex,
     instance
 };
 
-enum class uniform_type : uint8_t
+enum class uniform_type : std::uint8_t
 {
     sampler,
     combined_image_sampler,
@@ -270,7 +315,7 @@ enum class uniform_type : uint8_t
     max
 };
 
-enum class cull_mode : uint8_t
+enum class cull_mode : std::uint8_t
 {
     none = 0x00,
     front_bit = 0x01,
@@ -278,13 +323,13 @@ enum class cull_mode : uint8_t
     front_and_back = front_bit | back_bit
 };
 
-enum class front_face : uint8_t
+enum class front_face : std::uint8_t
 {
     counter_clockwise,
     clockwise
 };
 
-enum class logic_op : uint8_t
+enum class logic_op : std::uint8_t
 {
     clear,
     op_and,
@@ -304,7 +349,7 @@ enum class logic_op : uint8_t
     set
 };
 
-enum class dynamic_state : uint8_t
+enum class dynamic_state : std::uint8_t
 {
     none = 0x00,
     line_width = 0x01,
@@ -316,7 +361,7 @@ enum class dynamic_state : uint8_t
     stencil_reference = 0x40,
 };
 
-enum class initial_action : uint8_t
+enum class initial_action : std::uint8_t
 {
     clear,
     keep,
@@ -324,14 +369,14 @@ enum class initial_action : uint8_t
     ia_continue,
 };
 
-enum class final_action : uint8_t
+enum class final_action : std::uint8_t
 {
     read,
     discard,
     fa_continue
 };
 
-enum class primitive_topology : uint8_t
+enum class primitive_topology : std::uint8_t
 {
     points,
     lines,
@@ -346,7 +391,7 @@ enum class primitive_topology : uint8_t
     tesselation_patch,
 };
 
-enum class index_type : uint8_t
+enum class index_type : std::uint8_t
 {
     uint16,
     uint32
@@ -358,6 +403,8 @@ public:
     context(void* params);
     ~context();
 
+    void log(std::string_view str);
+
     friend class surface;
     friend class device;
 private:
@@ -368,16 +415,22 @@ private:
 class surface
 {
 public:
-    surface(const context& ctx, std::wstring name, uint32_t width, uint32_t height);
+    surface(const context& ctx, std::wstring name, std::uint32_t width, std::uint32_t height);
     ~surface();
 
-    inline uint32_t get_width() const { return width_; }
-    inline uint32_t get_height() const { return height_; }
+    inline std::uint32_t get_width() const { return width_; }
+    inline std::uint32_t get_height() const { return height_; }
+
+    void add_scroll_callback(std::function<void(std::int32_t)> cb) { scroll_callbacks_.push_back(std::move(cb)); }
+    void add_key_callback(std::function<void(std::uint32_t)> cb) { key_callbacks_.push_back(std::move(cb)); }
+
+    std::vector<std::function<void(std::int32_t)>> scroll_callbacks_;
+    std::vector<std::function<void(std::uint32_t)>> key_callbacks_;
 
     friend class device;
 private:
-    uint32_t width_;
-    uint32_t height_;
+    std::uint32_t width_;
+    std::uint32_t height_;
 
     std::unique_ptr<impl_::surface_gfx_data> surface_gfx_data_ptr_; // Graphics API specific data
     std::unique_ptr<impl_::surface_plat_data> surface_plat_data_ptr_; // platform specific data
@@ -391,7 +444,7 @@ public:
     ~device();
 
     format get_surface_format() const;
-    uint32_t get_frame() const;
+    std::uint32_t get_frame() const;
     void next_frame();
     void swap_buffers();
 
@@ -411,19 +464,19 @@ public:
     struct create_texture_params
     {
         format format;
-        uint32_t width;
-        uint32_t height;
-        uint32_t depth;
-        uint32_t mipmaps;
+        std::uint32_t width;
+        std::uint32_t height;
+        std::uint32_t depth;
+        std::uint32_t mipmaps;
         image_type type;
         sample_counts samples;
         image_usage usage;
-        uint32_t array_layers;
+        std::uint32_t array_layers;
         // TODO: ctor
     };
     [[nodiscard]]
     texture* create_texture(const create_texture_params& params, 
-        std::vector<std::vector<uint8_t>> data = std::vector<std::vector<uint8_t>>());
+        std::vector<std::vector<std::uint8_t>> data = std::vector<std::vector<std::uint8_t>>());
     void free_texture(texture* texture);
 
     // Framebuffers THESE DO NOT WORK rn
@@ -435,11 +488,14 @@ public:
     };
 
     using framebuffer_format_id = uint64_t;
-    static constexpr framebuffer_format_id surface_ffid = -1;
+    static constexpr framebuffer_format_id surface_ffid = 0;
     framebuffer_format_id create_framebuffer_format(std::vector<attachment_format> formats);
     [[nodiscard]]
-    framebuffer* create_framebuffer(std::vector<texture*> texture_attachments, framebuffer_format_id* format_check = nullptr);
+    framebuffer* create_framebuffer(std::vector<texture*> texture_attachments);
     void free_framebuffer(framebuffer* framebuffer);
+
+    framebuffer* get_surface_framebuffer() const;
+    framebuffer_format_id get_framebuffer_format(framebuffer* framebuffer) const;
 
     // Samplers, kinda TODO
     struct create_sampler_params
@@ -469,17 +525,86 @@ public:
     // Buffers
     // TODO: free, custom allocation
     [[nodiscard]]
-    buffer* create_buffer(buffer_type type, const size_t size, const void* data);
-    void update_buffer(buffer*, const size_t offset, const size_t size, const void const* data);
+    buffer* create_buffer(buffer_type type, const std::size_t size, const void* data);
     void free_buffer(buffer* buffer);
+
+    //void update_buffer(buffer*, const std::size_t offset, const std::size_t size, const void const* data);
+    
+    template<typename T>
+    class scoped_mmap
+    {
+    public:
+        template<typename Ty>
+        friend class scoped_mmap;
+
+        using element_type = T;
+        using value_type = std::remove_cv_t<element_type>;
+        using difference_type = ptrdiff_t;
+        using pointer = element_type*;
+        using const_pointer = const element_type*;
+        using reference = element_type&;
+        using const_reference = const element_type&;
+        using iterator = element_type*;
+        using reverse_iterator = std::reverse_iterator<iterator>;
+
+        scoped_mmap(T* data, const std::size_t size, const device* owner, const buffer* buf) : data_(data), size_(size), owner_(owner), buf_(buf) {}
+        ~scoped_mmap() { if (buf_ && owner_) { owner_->unmap_buffer_mem(buf_); } }
+        scoped_mmap() noexcept = default;
+        scoped_mmap(const scoped_mmap&) = delete;
+        template<typename Ty>
+        scoped_mmap(scoped_mmap<Ty>&& other) noexcept : scoped_mmap<T>(other.data<T>(), other.size(), other.owner_, other.buf_) { other.buf_ = nullptr; }
+        
+        scoped_mmap& operator=(const scoped_mmap&) = delete;
+        template<typename Ty>
+        inline scoped_mmap& operator=(scoped_mmap<Ty>&& v) noexcept 
+        { // TODO: copy&swap? ugly
+            data_ = v.data<T>();
+            size_ = v.size_;
+            owner_ = v.owner_;
+            buf_ = v.buf_;
+            v.buf_ = nullptr;
+            return *this;
+        };
+
+        inline size_t size() const noexcept { return size_; }
+        inline bool empty() const noexcept { return !data_ || size_ == 0; }
+        template<typename Ty = T> 
+        inline Ty* data() const noexcept { return reinterpret_cast<Ty*>(data_); }
+
+        inline iterator begin() const noexcept { return iterator(data()); }
+        inline iterator end() const noexcept { return iterator(data() + size_); }
+        inline reverse_iterator rbegin() const noexcept { return reverse_iterator(end()); }
+        inline reverse_iterator rend() const noexcept { return reverse_iterator(begin()); }
+
+        inline reference operator[](const size_t i) const { return data()[i]; }
+        template<typename Ty = T> 
+        inline reference at(const size_t i) const { return data<Ty>()[i]; }
+        constexpr reference front() const { return data()[0]; }
+        constexpr reference back() const { return std::next(data(), size_ - 1); }
+    private:
+        T* data_;
+        std::size_t size_;
+        const device* owner_;
+        const buffer* buf_;
+    };
+    
+    template<typename T>
+    scoped_mmap<T> map_buffer(buffer* buffer, const std::size_t offset, const std::size_t size) const
+    {
+        scoped_mmap<std::byte> byte_mmap = map_buffer<std::byte>(buffer, offset * sizeof(T), size * sizeof(T));
+        return scoped_mmap<T>(std::move(byte_mmap));
+    }
+
+    template<>
+    scoped_mmap<std::byte> map_buffer(buffer* buffer, const std::size_t offset, const std::size_t size) const;
 
     // Vertex format
     struct vertex_attribute
     {
-        uint32_t location;
-        uint32_t offset;
+        std::uint32_t location;
+        std::uint32_t offset;
         format format;
-        uint32_t stride;
+        std::uint32_t stride;
         vertex_input_rate input_rate;
     };
 
@@ -492,106 +617,126 @@ public:
     {
         std::vector<shader_stage> stages;
         uniform_type type;
-        uint32_t binding;
-        
-        using type_variant = std::variant<sampler*, texture*, buffer*>;
+        std::uint32_t binding;
+    };
+    
+    using uniform_set_format_id = std::uint64_t;
+    uniform_set_format_id create_uniform_set_format(const std::vector<uniform_info>& uniform_infos);
+
+    [[nodiscard]]
+    uniform_set* create_uniform_set(const uniform_set_format_id format_id);
+    void free_uniform_set(uniform_set* uniform_set);
+
+    using type_variant = std::variant<sampler*, texture*, buffer*>;
+    struct uniform_set_write
+    {
+        std::uint32_t binding;
         std::vector<type_variant> data;
     };
-    [[nodiscard]]
-    uniform_set* create_uniform_set(std::vector<uniform_info> uniform_infos, shader* shader);
-    void free_uniform_set(uniform_set* uniform_set);
+    void update_uniform_set(uniform_set* set, const std::vector<uniform_set_write>& writes);
 
     // Pipeline
     // TODO: render_primitive
 
     struct pipeline_rasterization_state 
     {
-        bool enable_depth_clamp;
-        bool enable_rasterizer_discard;
-        bool wireframe;
-        cull_mode cull_mode;
-        front_face front_face;
-        
-        // TODO: ctor
+        bool enable_depth_clamp = false;
+        bool enable_rasterizer_discard = false;
+        bool wireframe = false;
+        cull_mode cull_mode = cull_mode::none;
+        front_face front_face = front_face::clockwise;
     };
 
     struct pipeline_multisample_state
     {
-        sample_counts sample_count;
-        bool enable_sample_shading;
-        float min_sample_shading;
-        std::vector<uint32_t> sample_mask;
-        bool enable_alpha_to_coverage;
-        bool enable_alpha_to_one;
-
-        // TODO: ctor
+        sample_counts sample_count = sample_counts::e1_bit;
+        bool enable_sample_shading = false;
+        float min_sample_shading = 0.f;
+        std::vector<std::uint32_t> sample_mask = {};
+        bool enable_alpha_to_coverage = false;
+        bool enable_alpha_to_one = false;
     };
 
     struct pipeline_depth_stencil_state
     {
-        bool enable_depth_test;
-        bool enable_stencil_test;
-        bool enable_depth_write;
-        compare_op depth_compare_operator;
-        bool enable_depth_range;
-        float min_depth_range;
-        float max_depth_range;
+        bool enable_depth_test = true;
+        bool enable_stencil_test = false;
+        bool enable_depth_write = true;
+        compare_op depth_compare_operator = compare_op::less;
+        bool enable_depth_range = false;
+        float min_depth_range = 0.f;
+        float max_depth_range = 1.f;
+    };
 
-        // TODO: ctor
-        // TODO: stencil operation state
+    struct color_blend_attachment_state
+    {
+        bool blend_enable = false;
+
+        struct blend_eqn
+        {
+            blend_factor src;
+            blend_op op;
+            blend_factor dst;
+        };
+
+        blend_eqn color_eqn = { blend_factor::src_alpha, blend_op::add, blend_factor::one_minus_src_alpha };
+        blend_eqn alpha_eqn = { blend_factor::one, blend_op::add, blend_factor::zero };
     };
 
     struct pipeline_color_blend_state
     {
-        bool enable_logic_op;
-        logic_op logic_op;
-        
-        // TODO: ctor
-        // TODO: blend attachments
+        bool enable_logic_op = false;
+        logic_op logic_op = logic_op::copy;
+        std::vector<color_blend_attachment_state> blend_attachments = { color_blend_attachment_state() };
     };
-    [[nodiscard]]
-    graphics_pipeline* create_graphics_pipeline(std::vector<shader*> shaders, std::vector<uniform_set*> uniforms, framebuffer_format_id ffid, vertex_format_id vfid, primitive_topology topology, const pipeline_rasterization_state& rasterization_state,
-        const pipeline_multisample_state& multisample_state, const pipeline_depth_stencil_state& depth_stencil_state, const pipeline_color_blend_state& color_blend_state, dynamic_state dynamic_states);
-    void free_graphics_pipeline(graphics_pipeline* gfx_pipeline);
-    // TODO: compute pipeline
 
-    // TODO: command buffer
+    [[nodiscard]]
+    pipeline* create_graphics_pipeline(std::vector<shader*> shaders, const std::vector<uniform_set_format_id>& ufids, framebuffer_format_id ffid, vertex_format_id vfid, primitive_topology topology, const pipeline_rasterization_state& rasterization_state,
+        const pipeline_multisample_state& multisample_state, const pipeline_depth_stencil_state& depth_stencil_state, const pipeline_color_blend_state& color_blend_state, dynamic_state dynamic_states);
+    void free_graphics_pipeline(pipeline* pipeline);
+
+    pipeline* create_compute_pipeline(shader* shader, const std::vector<uniform_set_format_id>& ufids);
+    void free_compute_pipeline(pipeline* pipeline);
 
     using cmd_buf_id = uint64_t;
     using color = std::array<float, 4>;
-    struct begin_gfx_cmd_buf_params
+    cmd_buf_id begin_cmd_buf();
+    void cmd_buf_bind_uniform_set(cmd_buf_id id, uniform_set* uniform_set, pipeline* pipeline, std::uint32_t index);
+    void cmd_buf_end(cmd_buf_id id);
+
+    struct bind_framebuffer_params
     {
-        framebuffer* framebuffer;
-        initial_action initial_color_action;
-        final_action final_color_action;
-        initial_action initial_depth_action;
-        final_action final_depth_action;
-        
         std::vector<color> clear_color_values = std::vector<color>();
-        float clear_depth = 1.f;
-        uint32_t clear_stencil = 0;
+        bool clear_depth_stencil = true;
+        float clear_depth_value = 1.f;
+        std::uint32_t clear_stencil_value = 0;
     };
-   
-    cmd_buf_id begin_gfx_cmd_buf_for_surface(const color& clear_color = {});
-    cmd_buf_id begin_gfx_cmd_buf(const begin_gfx_cmd_buf_params& params);
-    void gfx_cmd_buf_bind_pipeline(cmd_buf_id id, graphics_pipeline* pipeline);
-    void gfx_cmd_buf_bind_uniform_set(cmd_buf_id id, uniform_set* uniform_set, graphics_pipeline* pipeline, uint32_t index);
-    void gfx_cmd_buf_bind_vertex_array(cmd_buf_id id, buffer* vertex_array);
-    void gfx_cmd_buf_bind_index_array(cmd_buf_id id, buffer* index_array, index_type index_type);
-    void gfx_cmd_buf_draw(cmd_buf_id id, bool use_indices, uint32_t element_count, uint32_t instances = 1);
-    void gfx_cmd_buf_end(cmd_buf_id id);
+    void cmd_buf_bind_framebuffer(cmd_buf_id id, framebuffer* fb, const bind_framebuffer_params& params = bind_framebuffer_params());
+    void cmd_buf_bind_gfx_pipeline(cmd_buf_id id, pipeline* pipeline);
+    void cmd_buf_bind_vertex_array(cmd_buf_id id, const std::vector<buffer*>& vertex_array);
+    void cmd_buf_bind_index_array(cmd_buf_id id, buffer* index_array, index_type index_type);
+    void cmd_buf_draw(cmd_buf_id id, bool use_indices, std::uint32_t element_count, std::uint32_t instances = 1);
 
-    // TODO: compute lists
+    void cmd_buf_bind_cpu_pipeline(cmd_buf_id id, pipeline* pipeline);
+    void cmd_buf_dispatch(cmd_buf_id id, std::uint32_t x_groups, std::uint32_t y_groups, std::uint32_t z_groups);
 
-    DEFINE_SMART_PTR_METHODS(shader);
-    DEFINE_SMART_PTR_METHODS(texture);
-    DEFINE_SMART_PTR_METHODS(framebuffer);
-    DEFINE_SMART_PTR_METHODS(sampler);
-    DEFINE_SMART_PTR_METHODS(buffer);
-    DEFINE_SMART_PTR_METHODS(uniform_set);
-    DEFINE_SMART_PTR_METHODS(graphics_pipeline);
+    template<typename T> 
+    struct deleter {};
+    DEFINE_SMART_PTR(shader);
+    DEFINE_SMART_PTR(texture);
+    DEFINE_SMART_PTR(framebuffer);
+    DEFINE_SMART_PTR(sampler);
+    DEFINE_SMART_PTR(buffer);
+    DEFINE_SMART_PTR(uniform_set);
+    DEFINE_SMART_PTR(graphics_pipeline);
+    DEFINE_SMART_PTR_METHODS(compute_pipeline);
+
+    template<typename T>
+    using ptr = std::unique_ptr<T, deleter<T>>;
 
 private:
+
+    void unmap_buffer_mem(const buffer* buffer) const;
 
     std::unique_ptr<impl_::device_data> device_data_ptr_;
 };

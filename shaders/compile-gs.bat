@@ -1,0 +1,1 @@
+C:\VulkanSDK\1.2.162.1\Bin\glslc.exe -fshader-stage=geom -o spirv/%1.spv %1.glsl

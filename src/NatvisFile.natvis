@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?> 
+<AutoVisualizer xmlns="http://schemas.microsoft.com/vstudio/debugger/natvis/2010">
+	<Type Name="xs::mth::mat">
+		<DisplayString>{{expand me}}</DisplayString>
+		<Expand>
+			<Item Name="[row0]">{base_.m[0][0]}, {base_.m[0][1]}, {base_.m[0][2]}, {base_.m[0][3]}</Item>
+			<Item Name="[row1]">{base_.m[1][0]}, {base_.m[1][1]}, {base_.m[1][2]}, {base_.m[1][3]}</Item>
+			<Item Name="[row2]">{base_.m[2][0]}, {base_.m[2][1]}, {base_.m[2][2]}, {base_.m[2][3]}</Item>
+			<Item Name="[row3]">{base_.m[3][0]}, {base_.m[3][1]}, {base_.m[3][2]}, {base_.m[3][3]}</Item>
+			<ArrayItems>
+				<Size>16</Size>
+				<ValuePointer>base_[0]</ValuePointer>
+			</ArrayItems>
+		</Expand>
+	</Type>
+</AutoVisualizer>

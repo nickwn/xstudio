@@ -1,126 +1,156 @@
+#include <cassert>
 #include <fstream>
 #include <chrono>
 #include <thread>
+#include <numeric>
 
-#define NOMINMAX
 #include <Windows.h>
 
 #include <fcntl.h>
 
-#include "meth/meth.hpp"
+#include "meth/math.hpp"
 #include "rhi/rhi.hpp"
 #include "renderer.hpp"
-#include "scene.hpp"
-#include "particles.hpp"
+#include "skel.hpp"
+#include "asset_loaders.hpp"
+//#include "sim.hpp"
 
-std::vector<xs::mth::pos> vertices = {
-	{-0.5f, -0.5f, 0.f},
-	{0.5f, -0.5f, 0.f},
-	{0.5f, 0.5f, 0.f},
-	{-0.5f, 0.5f, 0.f}
-};
-
-std::vector<uint16_t> indices = {
-	0, 1, 2, 2, 3, 0
-};
-
-xs::particle_system init_particle_system(const size_t num_particles, float spacing, xs::rhi::device* device, std::vector<size_t>& out_particle_idxs)
+struct mvp_buffer
 {
-	const size_t cbrt_num_particles = std::cbrt(num_particles);
-	out_particle_idxs.reserve(num_particles);
-
-	std::vector<xs::particle> particles;
-	particles.reserve(num_particles);
-
-	std::vector<xs::mth::pos> mesh_verts;
-	mesh_verts.reserve(num_particles);
-
-	const xs::mth::pos center = xs::mth::pos(0.f, 0.f, 1.f);
-	for (size_t i = 0; i < num_particles; i++)
-	{
-		float x_off = float(i % cbrt_num_particles) * spacing;
-		float y_off = float(i / cbrt_num_particles % cbrt_num_particles) * spacing;
-		float z_off = float(i / (cbrt_num_particles * cbrt_num_particles)) * spacing;
-		const xs::mth::dir offset = xs::mth::pos(x_off, y_off, z_off);
-		out_particle_idxs.push_back(i);
-		xs::particle temp_particle = xs::particle{
-			center + offset,
-			xs::mth::dir::zero,
-			0, // uninitialized, to be calculated
-			0.f // pressure to be calculated
-		};
-
-		particles.push_back(temp_particle);
-		mesh_verts.push_back(temp_particle.pos);
-	}
-
-	static constexpr float h = .5f; // TODO: set
-	xs::particle_system particle_system = xs::particle_system(particles, device, spacing, 10.f, 1.f); // placeholders
-	return particle_system;
-}
+	Eigen::Matrix4f model;
+	Eigen::Matrix4f view;
+	Eigen::Matrix4f proj;
+};
 
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow)
 {
-	using namespace std::chrono_literals;
-	//std::this_thread::sleep_for(30s);
+	LPWSTR* argv;
+	int argc;
 
-	xs::rhi::context ctx = xs::rhi::context(&hInstance);
-	std::shared_ptr<xs::rhi::surface> window = std::make_unique<xs::rhi::surface>(ctx, L"test window", 512, 512);
+	argv = CommandLineToArgvW(GetCommandLine(), &argc);
+	assert(argv != nullptr);
+
+	std::string skel_filename = "../assets/wasp.skel";
+	std::string skin_filename = "../assets/wasp.skin";
+	std::string anim_filename = "../assets/wasp_walk.anim";
+	if (argc > 1)
+	{
+		std::wstring temp_filename = std::wstring(argv[1]); // really dumb
+		skel_filename = std::string(std::begin(temp_filename), std::end(temp_filename));
+
+		temp_filename = std::wstring(argv[2]);
+		skin_filename = std::string(std::begin(temp_filename), std::end(temp_filename));
+
+		temp_filename = std::wstring(argv[3]);
+		anim_filename = std::string(std::begin(temp_filename), std::end(temp_filename));
+	}
+	
+	LocalFree(argv);
+
+	xs::rhi::context ctx = xs::rhi::context(&hInstance); 
+	std::shared_ptr<xs::rhi::surface> window = std::make_unique<xs::rhi::surface>(ctx, L"test window", 1920, 1080);
 	std::shared_ptr<xs::rhi::device> device = std::make_shared<xs::rhi::device>(ctx, window.get());
 
-	std::vector<size_t> particle_idxs;
-	xs::particle_system particle_system = init_particle_system(125, 0.07f, device.get(), particle_idxs);
-
-	using namespace std::placeholders;  // for _1, _2, _3...
-	std::shared_ptr<xs::scene> scene = std::make_shared<xs::scene>();
-	const xs::system_id eval_pressure_sid = scene->get_system_registry().register_function(
-		std::bind(&xs::particle_system::evaluate_pressure, &particle_system, _1)
-	);
-	const xs::system_id eval_pressure_force_sid = scene->get_system_registry().register_function(
-		std::bind(&xs::particle_system::evaluate_pressure_force, &particle_system, _1)
-	);
-	const xs::system_id eval_friction_force_sid = scene->get_system_registry().register_function(
-		std::bind(&xs::particle_system::evaluate_friction_force, &particle_system, _1)
-	);
-	const xs::system_id eval_gravity_force_sid = scene->get_system_registry().register_function(
-		std::bind(&xs::particle_system::evaluate_gravity_force, &particle_system, _1)
-	);
-	const xs::system_id eval_collision_force_sid = scene->get_system_registry().register_function(
-		std::bind(&xs::particle_system::evaluate_collision_force, &particle_system, _1)
-	);
-	const xs::applicator_id particle_system_aid = scene->get_applicator_registry().register_function(
-		std::bind(&xs::particle_system::apply_particle_forces, &particle_system, _1, _2, _3)
+	std::shared_ptr<xs::skeleton> skel = xs::loaders::load_skeleton(skel_filename);
+	std::shared_ptr<xs::skinned_mesh> skinned_mesh = xs::loaders::load_skinned_mesh(skin_filename);
+	std::shared_ptr<xs::rig> rig = std::make_shared<xs::rig>(skel, skinned_mesh);
+	
+	/*const std::size_t cloth_res = 32;
+	std::vector<xs::sim::size2_t> fixed_idxs = { {0, 0}, { cloth_res - 1, 0 } };
+	std::shared_ptr<xs::cloth> cloth = std::make_shared<xs::cloth>(xs::sim::size2_t{ cloth_res, cloth_res },
+		xs::mth::pos(-2.f, -2.f, 0.f), xs::mth::pos(2.f, 2.f, 0.f), fixed_idxs
 	);
 
-	scene->add_draw_item(particle_system.get_mesh().draw_items.front());
+	std::shared_ptr<xs::sph_sim> sph_sim = std::make_shared<xs::sph_sim>(
+		xs::sim::range3_t{ xs::mth::pos(-.5f), xs::mth::pos(.5f) }, 800, .2f, 1000000.f, 1.f // h, p0, k
+	);*/
+	std::shared_ptr<xs::skeletal_anim> skel_anim = xs::loaders::load_skeletal_anim(anim_filename);
+	xs::player anim_player = xs::player(skel_anim);
+	anim_player.add_rig(rig);
+	anim_player.play();
 
-	xs::mesh triangle = xs::mesh(device.get(), vertices, indices);
+	std::unique_ptr<xs::renderer> renderer = std::make_unique<xs::renderer>(device, window);
 
-	//std::vector<entt::entity> source_tri_verts = scene->add_source_nodes(&triangle);
-	std::vector<entt::entity> source_verts = scene->add_source_nodes(particle_idxs);
-	std::vector<entt::entity> eval_pressure_nodes = scene->add_eval_nodes<int, true>(source_verts, eval_pressure_sid);
-	std::vector<entt::entity> eval_pressure_force_nodes = scene->add_eval_nodes(eval_pressure_nodes, eval_pressure_force_sid);
-	//std::vector<entt::entity> eval_friction_force_nodes = scene->add_eval_nodes(eval_pressure_force_nodes, eval_friction_force_sid);
-	std::vector<entt::entity> eval_gravity_force_nodes = scene->add_eval_nodes(eval_pressure_force_nodes, eval_gravity_force_sid);
-	std::vector<entt::entity> eval_collision_force_nodes = scene->add_eval_nodes(eval_gravity_force_nodes, eval_collision_force_sid);
-	scene->assign_node_data(eval_collision_force_nodes, particle_system_aid);
+	mvp_buffer mvp_buf; // TODO: init
+	mvp_buf.model = (Eigen::Translation3f(0.f, 0.f, 0.f) * Eigen::AngleAxisf(0.f, Eigen::Vector3f(0.f, 0.f, 1.f))).matrix();
+	//xs::mth::to_mat(xs::mth::transform(xs::mth::pos(0.f, 0.f, 0.f), xs::mth::to_quat(0.f, xs::mth::dir(0.f, 0.f, 1.f))));
+	mvp_buf.view = xs::mth::look_at(Eigen::Vector3f(2.f, 0.f, 0.f), Eigen::Vector3f(0.f, 0.f, 0.f), Eigen::Vector3f(0.f, -1.f, 0.f));
+	//mvp_buf.view = xs::mth::look_at(xs::mth::pos(0.f, -40.f, -60.f), xs::mth::pos(0.f, 0.f, 0.f), xs::mth::dir(0.f, 1.f, 0.f));
+	mvp_buf.proj = xs::mth::perspective(xs::mth::to_rad(60.f), window->get_width(), window->get_height(), .1f, 100.f);
+	auto d_mvp_buf = device->create_buffer_unique(xs::rhi::buffer_type::uniform, sizeof(mvp_buf), &mvp_buf);
 
-	std::unique_ptr<xs::renderer> renderer = std::make_unique<xs::renderer>(device, scene, window);
+	xs::renderer::stage_params skinned_vs = {
+		.stage = xs::rhi::shader_stage::vertex,
+		.filename = "../shaders/spirv/vert_skin.spv"
+	};
 
-	std::chrono::time_point last_eval = std::chrono::steady_clock::now();
+	xs::renderer::stage_params skinned_fs = {
+		.stage = xs::rhi::shader_stage::fragment,
+		.filename = "../shaders/spirv/frag_skin.spv"
+	};
+	const xs::render_pass& skinned_pass = xs::render_pass_registry::get().add("skinned", 
+		renderer->create_graphics_pass({ skinned_vs, skinned_fs }, xs::rhi::primitive_topology::triangles)
+	);
 
+	xs::renderer::stage_params simple_vs = {
+		.stage = xs::rhi::shader_stage::vertex,
+		.filename = "../shaders/spirv/vert.spv"
+	};
+	xs::renderer::stage_params simple_fs = {
+		.stage = xs::rhi::shader_stage::fragment,
+		.filename = "../shaders/spirv/frag.spv"
+	};
+	const xs::render_pass& simple_pass = xs::render_pass_registry::get().add("simple",
+		renderer->create_graphics_pass({ simple_vs, simple_fs }, xs::rhi::primitive_topology::triangles)
+	);
+
+	xs::renderer::stage_params skel_vs = {
+		.stage = xs::rhi::shader_stage::vertex,
+		.filename = "../shaders/spirv/vert_skel.spv"
+	};
+	xs::renderer::stage_params skel_fs = {
+		.stage = xs::rhi::shader_stage::fragment,
+		.filename = "../shaders/spirv/frag_skel.spv"
+	};
+	const xs::render_pass& skel_pass = xs::render_pass_registry::get().add("lines",
+		renderer->create_graphics_pass({ skel_vs, skel_fs }, xs::rhi::primitive_topology::lines)
+	);
+
+	xs::renderer::stage_params points_vs = {
+		.stage = xs::rhi::shader_stage::vertex,
+		.filename = "../shaders/spirv/vert_sph.spv"
+	};
+	xs::renderer::stage_params points_fs = {
+		.stage = xs::rhi::shader_stage::fragment,
+		.filename = "../shaders/spirv/frag_sph.spv"
+	};
+	const xs::render_pass& simple_points_pass = xs::render_pass_registry::get().add("simple_points",
+		renderer->create_graphics_pass({ points_vs, points_fs }, xs::rhi::primitive_topology::points)
+	);
+
+	//xs::draw_item cloth_draw_item = cloth->draw_item(device.get(), d_mvp_buf.get());
+	xs::draw_item rig_draw_item = skinned_mesh->draw_item(device.get(), d_mvp_buf.get());
+	xs::draw_item skel_draw_item = skel->draw_item(device.get(), d_mvp_buf.get());
+	//xs::draw_item sph_draw_item = sph_sim->draw_item(device.get(), d_mvp_buf.get());
+
+	renderer->update_draw_list({ rig_draw_item, skel_draw_item });
 	MSG msg = { };
 	while (GetMessage(&msg, NULL, 0, 0))
 	{
+		//anim_player.update();
+		//rig->evaluate();
+
+		/*for (std::size_t i = 0; i < 1; i++) 
+		{
+			cloth->update(0.001f);
+		}*/
+		/*for (std::size_t i = 0; i < 100; i++)
+		{
+			sph_sim->update(0.0005f);
+		}*/
+
 		renderer->render();
 		device->next_frame();
-
-		std::chrono::time_point cur_time = std::chrono::steady_clock::now();
-		std::chrono::duration<float> dt = cur_time - last_eval;
-		last_eval = cur_time;
-		scene->evaluate(dt.count() * .05f);
-		particle_system.get_mesh().upload(device.get());
-		particle_system.get_grid().optimize();
 
 		TranslateMessage(&msg);
 		DispatchMessage(&msg);
