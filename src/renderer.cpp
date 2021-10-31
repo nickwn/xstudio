@@ -1,40 +1,29 @@
 #include "renderer.hpp"
 
-#include <fstream>
 #include <array>
 #include <cassert>
 
 #include "spirv_reflect.h"
 
-#include "meth/math.hpp"
+#include "util.hpp"
+#include "math/math.hpp"
 #include "rhi/rhi.hpp"
 
 namespace xs
 {
-std::string read_file(std::string filename)
-{
-	std::ifstream file(filename, std::ios::ate | std::ios::binary);
-
-	if (!file.is_open())
-	{
-		throw std::runtime_error("Failed to open file!");
-	}
-
-	std::size_t file_size = (std::size_t)file.tellg();
-	std::string buffer = std::string(file_size, ' ');
-	file.seekg(0);
-	file.read(buffer.data(), file_size);
-	file.close();
-
-	return buffer;
-}
 
 renderer::renderer(std::shared_ptr<rhi::device> device, std::shared_ptr<rhi::surface> surface) :
-	device_(device)
+	device_(device),
+	draw_list_()
 {}
 
 void renderer::render()
 {
+	if (draw_list_.empty())
+	{
+		return;
+	}
+
 	for (const draw_item& item : draw_list_)
 	{
 		item.update(device_.get());
@@ -43,7 +32,7 @@ void renderer::render()
 	device_->swap_buffers();
 }
 
-static inline void process_command(const std::vector<draw_item>& draw_list, std::size_t item_idx, rhi::device::cmd_buf_id cmd_buf_id, rhi::device* device)
+static void process_command(const std::vector<draw_item>& draw_list, std::size_t item_idx, rhi::device::cmd_buf_id cmd_buf_id, rhi::device* device)
 {
 	const std::size_t prev_item_idx = std::max<std::int64_t>(0, item_idx - 1);
 
@@ -208,9 +197,9 @@ render_pass renderer::create_graphics_pass(const std::vector<stage_params>& stag
 	{
 		const auto temp_shader_params = rhi::device::create_shader_params{
 			params.stage,
-			read_file(params.filename),
+			util::read_file(params.filename),
 		};
-		
+
 		auto shader = device_->create_shader_unique(temp_shader_params);
 		shaders.push_back(std::move(shader));
 
@@ -326,7 +315,7 @@ render_pass renderer::create_compute_pass(const stage_params& stage)
 
 	const auto temp_shader_params = rhi::device::create_shader_params{
 		.stage = stage.stage,
-		.bytecode = read_file(stage.filename),
+		.bytecode = util::read_file(stage.filename),
 	};
 
 	auto shader = device_->create_shader_unique(temp_shader_params);

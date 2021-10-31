@@ -6,7 +6,7 @@
 #include <chrono>
 #include <optional>
 
-#include "meth/math.hpp"
+#include "math/math.hpp"
 #include "draw_item.hpp"
 
 namespace xs
@@ -129,6 +129,7 @@ private:
 	std::shared_ptr<skinned_mesh> skinned_mesh_;
 };
 
+// TODO: turns out 16 bit float isn't very accurate, change this possibly
 class compressed_curve // more like semi compressed
 {
 public:

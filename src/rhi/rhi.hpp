@@ -738,7 +738,7 @@ private:
 
     void unmap_buffer_mem(const buffer* buffer) const;
 
-    std::unique_ptr<impl_::device_data> device_data_ptr_;
+    std::unique_ptr<impl_::device_data> data_ptr_;
 };
 
 } // namespace rhi

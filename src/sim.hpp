@@ -3,8 +3,8 @@
 #include <vector>
 #include <unordered_set>
 
-#include "meth/math.hpp"
-#include "meth/pcg32.hpp"
+#include "math/math.hpp"
+#include "math/pcg32.hpp"
 #include "rhi/rhi.hpp"
 #include "draw_item.hpp"
 #include "renderer.hpp"

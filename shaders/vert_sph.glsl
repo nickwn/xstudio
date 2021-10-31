@@ -9,6 +9,6 @@ layout(binding = 0) uniform UniformBufferObject{
 } mvp;
 
 void main() {
-    gl_Position = mvp.proj * mvp.view * mvp.model * vec4(inPosition, 1.0);
+    gl_Position = vec4(inPosition, 1.0); //mvp.proj * mvp.view * mvp.model * vec4(inPosition, 1.0);
     gl_PointSize = 2.f;
 }

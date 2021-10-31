@@ -1,12 +1,15 @@
 #include "rhi.hpp"
 #include "rhi_vk.hpp"
+
+#define VMA_IMPLEMENTATION
+#include "vk_mem_alloc.h"
+
 #include <vector>
+#include <unordered_map>
 
 // TODOS:
-// memory allocator (vma?)
-// fix framebuffers
-// BETTER DESCRIPTOR SET POOLING!!!!!!
 // barriers/sync
+// better cmd bufs
 
 namespace xs
 {
@@ -38,35 +41,49 @@ namespace impl_
 		vk::PipelineVertexInputStateCreateInfo input_state_create_info;
 	};
 
+	struct desc_set_counts
+	{
+		unsigned samplers : 4;
+		unsigned combined_image_samplers : 4;
+		unsigned sampled_images : 4;
+		unsigned storage_images : 4;
+		unsigned uniform_texel_buffers : 4;
+		unsigned storage_texel_buffers : 4;
+		unsigned uniform_buffers : 4;
+		unsigned storage_buffers : 4;
+		unsigned uniform_buffer_dynamics : 4;
+		unsigned storage_buffer_dynamics : 4;
+		unsigned input_attachments : 4;
+		unsigned pad_ : 20;
+
+		operator std::uint64_t() const
+		{
+			return *reinterpret_cast<const std::uint64_t*>(this);
+		}
+	};
+
 	struct descriptor_set_format
 	{
 		vk::UniqueDescriptorSetLayout layout;
+		desc_set_counts ds_counts;
+		std::unordered_map<std::uint32_t, vk::DescriptorType> types;
+	};
 
-		using descriptor_type = std::pair<std::uint32_t, vk::DescriptorType>;
-		std::vector<descriptor_type> binding_types;
+	struct ds_pool_manager
+	{
+		std::unordered_map<std::uint64_t, vk::DescriptorPool> active_pools;
+		std::vector<vk::UniqueDescriptorPool> pools;
 
-		descriptor_set_format(vk::UniqueDescriptorSetLayout&& layout_, std::size_t num_descriptors_) : 
-			layout(std::move(layout_)), binding_types(num_descriptors_, std::make_pair(-1, vk::DescriptorType::eUniformBuffer)) 
-		{}
-
-		void insert(const std::uint32_t binding, const vk::DescriptorType type)
+		vk::DescriptorPool* get(const desc_set_counts ds_counts)
 		{
-			std::size_t try_idx = binding % binding_types.size();
-			while (binding_types[try_idx].first != -1)
-			{
-				try_idx = (try_idx + 1) % binding_types.size();
-			}
-			binding_types[try_idx] = std::make_pair(binding, type);
+			const auto itr = active_pools.find(std::uint64_t(ds_counts));
+			return itr == std::end(active_pools) ? nullptr : &itr->second;
 		}
 
-		vk::DescriptorType get(const std::uint32_t binding) const
+		void insert(const desc_set_counts ds_counts, vk::UniqueDescriptorPool&& pool)
 		{
-			std::size_t try_idx = binding % binding_types.size();
-			while (binding_types[try_idx].first != binding)
-			{
-				try_idx = (try_idx + 1) % binding_types.size();
-			}
-			return binding_types[try_idx].second;
+			pools.push_back(std::move(pool));
+			active_pools[std::uint64_t(ds_counts)] = pools.back().get();
 		}
 	};
 
@@ -91,11 +108,12 @@ namespace impl_
 	{
 		vk::UniqueDevice device;
 		vk::PhysicalDevice physical_device;
+		VmaAllocator allocator;
 		vk::UniqueSwapchainKHR swapchain; // only set if window is specified in ctor
 		std::vector<framebuffer_format> framebuffer_formats;
 		std::vector<vertex_format> vertex_formats;
 		std::vector<descriptor_set_format> descriptor_set_formats;
-		std::vector<vk::UniqueDescriptorPool> desc_pools; // TODO: pool reference count
+		ds_pool_manager ds_pool_manager;
 		std::vector<vk::UniqueCommandBuffer> cmd_bufs;
 		std::vector<frame_data> frames;
 		std::vector<surface_frame_data> surface_frame_data; // only if surface provided
@@ -126,7 +144,7 @@ namespace impl_
 		device::create_texture_params create_params; // should be on class but am lazy
 		vk::Image image;
 		vk::ImageView image_view;
-		vk::DeviceMemory memory;
+		VmaAllocation allocation;
 	};
 
 	struct sampler
@@ -137,7 +155,7 @@ namespace impl_
 	struct buffer
 	{
 		vk::Buffer buffer;
-		vk::DeviceMemory memory;
+		VmaAllocation allocation;
 		std::size_t size;
 	};
 
@@ -559,11 +577,70 @@ namespace impl_
 		throw std::runtime_error("failed to find supported format!");
 	}
 
+	desc_set_counts to_ds_counts(const std::vector<device::uniform_info>& uniform_infos)
+	{
+		desc_set_counts ds_counts = {
+			.samplers = 0,
+			.combined_image_samplers = 0,
+			.sampled_images = 0,
+			.storage_images = 0,
+			.uniform_texel_buffers = 0,
+			.storage_texel_buffers = 0,
+			.uniform_buffers = 0,
+			.storage_buffers = 0,
+			.uniform_buffer_dynamics = 0,
+			.storage_buffer_dynamics = 0,
+			.input_attachments = 0
+		};
+
+		for (const device::uniform_info& info : uniform_infos)
+		{
+			switch (info.type)
+			{
+			case uniform_type::sampler:
+				ds_counts.samplers++;
+				break;
+			case uniform_type::combined_image_sampler:
+				ds_counts.combined_image_samplers++;
+				break;
+			case uniform_type::sampled_image:
+				ds_counts.sampled_images++;
+				break;
+			case uniform_type::storage_image:
+				ds_counts.storage_images++;
+				break;
+			case uniform_type::uniform_texel_buffer:
+				ds_counts.uniform_texel_buffers++;
+				break;
+			case uniform_type::storage_texel_buffer:
+				ds_counts.storage_texel_buffers++;
+				break;
+			case uniform_type::uniform_buffer:
+				ds_counts.uniform_buffers++;
+				break;
+			case uniform_type::storage_buffer:
+				ds_counts.storage_buffers++;
+				break;
+			case uniform_type::uniform_buffer_dynamic:
+				ds_counts.uniform_buffer_dynamics++;
+				break;
+			case uniform_type::storage_buffer_dynamic:
+				ds_counts.storage_buffer_dynamics++;
+				break;
+			case uniform_type::input_attachment:
+				ds_counts.input_attachments++;
+				break;
+			}
+		}
+
+		return ds_counts;
+	}
+
 } // namespace impl_
 
 device::device(const context& ctx, surface* surface) : 
 	std::enable_shared_from_this<device>(),
-	device_data_ptr_(std::make_unique<impl_::device_data>())
+	data_ptr_(std::make_unique<impl_::device_data>())
 {
 	std::vector<vk::PhysicalDevice> physical_devices = ctx.context_gfx_data_ptr_->instance->enumeratePhysicalDevices();
 	for (const vk::PhysicalDevice& physical_device : physical_devices)
@@ -575,11 +652,11 @@ device::device(const context& ctx, surface* surface) :
 			has_gfx_or_compute |= (queue_fam_props[i].queueFlags & vk::QueueFlagBits::eCompute || queue_fam_props[i].queueFlags & vk::QueueFlagBits::eGraphics);
 			if (queue_fam_props[i].queueFlags & vk::QueueFlagBits::eCompute)
 			{
-				device_data_ptr_->compute_queue_fam_idx = i;
+				data_ptr_->compute_queue_fam_idx = i;
 			}
 			if (queue_fam_props[i].queueFlags & vk::QueueFlagBits::eGraphics)
 			{
-				device_data_ptr_->gfx_queue_fam_idx = i;
+				data_ptr_->gfx_queue_fam_idx = i;
 			}
 		}
 
@@ -592,7 +669,7 @@ device::device(const context& ctx, surface* surface) :
 				vk::Bool32 queue_fam_supports_surface = physical_device.getSurfaceSupportKHR(queue_fam_idx, surface->surface_gfx_data_ptr_->surface);
 				if (queue_fam_supports_surface)
 				{
-					device_data_ptr_->present_queue_fam_idx = queue_fam_idx;
+					data_ptr_->present_queue_fam_idx = queue_fam_idx;
 				}
 				device_supports_surface |= bool(queue_fam_supports_surface);
 			}
@@ -602,12 +679,12 @@ device::device(const context& ctx, surface* surface) :
 
 		if (good_device)
 		{
-			device_data_ptr_->physical_device = physical_device;
+			data_ptr_->physical_device = physical_device;
 			break;
 		}
 	}
 
-	std::vector<vk::QueueFamilyProperties> queue_fam_props = device_data_ptr_->physical_device.getQueueFamilyProperties();
+	std::vector<vk::QueueFamilyProperties> queue_fam_props = data_ptr_->physical_device.getQueueFamilyProperties();
 	std::vector<vk::DeviceQueueCreateInfo> queue_create_infos(queue_fam_props.size());
 	std::vector<std::vector<float>> queue_priorities(queue_fam_props.size());
 	for (std::size_t i = 0; i < queue_fam_props.size(); i++)
@@ -625,7 +702,7 @@ device::device(const context& ctx, surface* surface) :
 	vk::PhysicalDeviceShaderFloat16Int8Features extra_features = vk::PhysicalDeviceShaderFloat16Int8Features()
 		.setShaderFloat16(true)
 		.setShaderInt8(true);
-	vk::PhysicalDeviceFeatures features = device_data_ptr_->physical_device.getFeatures();
+	vk::PhysicalDeviceFeatures features = data_ptr_->physical_device.getFeatures();
 
 	vk::DeviceCreateInfo device_create_info = vk::DeviceCreateInfo()
 		.setQueueCreateInfoCount(queue_create_infos.size())
@@ -637,16 +714,28 @@ device::device(const context& ctx, surface* surface) :
 		.setPEnabledFeatures(&features)
 		.setPNext(&extra_features);
 
-	device_data_ptr_->device = device_data_ptr_->physical_device.createDeviceUnique(device_create_info);
+	data_ptr_->device = data_ptr_->physical_device.createDeviceUnique(device_create_info);
 
-	device_data_ptr_->frame = 0;
+	data_ptr_->frame = 0;
+
+	{
+		VmaAllocatorCreateInfo allocator_info = {
+			.physicalDevice = data_ptr_->physical_device,
+			.device = data_ptr_->device.get(),
+			.instance = ctx.context_gfx_data_ptr_->instance.get(),
+			.vulkanApiVersion = VK_API_VERSION_1_2
+		};
+
+		vmaCreateAllocator(&allocator_info, &data_ptr_->allocator);
+		assert(data_ptr_->allocator);
+	}
 
 	vk::Format surface_format;
 	if (surface)
 	{
-		vk::SurfaceCapabilitiesKHR surface_capabilities = device_data_ptr_->physical_device.getSurfaceCapabilitiesKHR(surface->surface_gfx_data_ptr_->surface);
-		std::vector<vk::PresentModeKHR> surface_present_modes = device_data_ptr_->physical_device.getSurfacePresentModesKHR(surface->surface_gfx_data_ptr_->surface);
-		std::vector<vk::SurfaceFormatKHR> formats = device_data_ptr_->physical_device.getSurfaceFormatsKHR(surface->surface_gfx_data_ptr_->surface);
+		vk::SurfaceCapabilitiesKHR surface_capabilities = data_ptr_->physical_device.getSurfaceCapabilitiesKHR(surface->surface_gfx_data_ptr_->surface);
+		std::vector<vk::PresentModeKHR> surface_present_modes = data_ptr_->physical_device.getSurfacePresentModesKHR(surface->surface_gfx_data_ptr_->surface);
+		std::vector<vk::SurfaceFormatKHR> formats = data_ptr_->physical_device.getSurfaceFormatsKHR(surface->surface_gfx_data_ptr_->surface);
 		
 		if (formats.size() == 1 && formats[0].format == vk::Format::eUndefined) 
 		{
@@ -663,7 +752,7 @@ device::device(const context& ctx, surface* surface) :
 		{
 			if (fmt == surface_format)
 			{
-				device_data_ptr_->surface_format = format(idx);
+				data_ptr_->surface_format = format(idx);
 			}
 		}
 
@@ -719,10 +808,10 @@ device::device(const context& ctx, surface* surface) :
 			}
 		}
 
-		std::vector<std::uint32_t> queue_fams = {device_data_ptr_->gfx_queue_fam_idx};
-		if (device_data_ptr_->gfx_queue_fam_idx != device_data_ptr_->present_queue_fam_idx)
+		std::vector<std::uint32_t> queue_fams = {data_ptr_->gfx_queue_fam_idx};
+		if (data_ptr_->gfx_queue_fam_idx != data_ptr_->present_queue_fam_idx)
 		{
-			queue_fams.push_back(device_data_ptr_->present_queue_fam_idx);
+			queue_fams.push_back(data_ptr_->present_queue_fam_idx);
 		}
 
 		vk::SwapchainCreateInfoKHR swapchain_create_info = vk::SwapchainCreateInfoKHR()
@@ -741,8 +830,8 @@ device::device(const context& ctx, surface* surface) :
 			.setPresentMode(present_mode)
 			.setClipped(true);
 
-		device_data_ptr_->swapchain = device_data_ptr_->device->createSwapchainKHRUnique(swapchain_create_info);
-		device_data_ptr_->surface_extent = surface_extent;
+		data_ptr_->swapchain = data_ptr_->device->createSwapchainKHRUnique(swapchain_create_info);
+		data_ptr_->surface_extent = surface_extent;
 
 		const static format depth_format = format::D32_sfloat;
 		create_texture_params depth_tex_create_params = {
@@ -756,7 +845,7 @@ device::device(const context& ctx, surface* surface) :
 			image_usage::depth_stencil_attachment_bit,
 			1
 		};
-		device_data_ptr_->depth_texture = create_texture(depth_tex_create_params);
+		data_ptr_->depth_texture = create_texture(depth_tex_create_params);
 
 		std::vector<vk::AttachmentReference> color_references = { vk::AttachmentReference(0, vk::ImageLayout::eColorAttachmentOptimal) };
 		vk::AttachmentReference depth_reference = vk::AttachmentReference(1, vk::ImageLayout::eDepthStencilAttachmentOptimal);
@@ -799,41 +888,40 @@ device::device(const context& ctx, surface* surface) :
 			.setDependencyCount(0)
 			.setPDependencies(nullptr);
 
-		vk::UniqueRenderPass surface_render_pass = device_data_ptr_->device->createRenderPassUnique(render_pass_create_info);
+		vk::UniqueRenderPass surface_render_pass = data_ptr_->device->createRenderPassUnique(render_pass_create_info);
 		impl_::framebuffer_format surface_ff = impl_::framebuffer_format{
 			.num_color_attachments = subpass.colorAttachmentCount,
 			.render_pass = std::move(surface_render_pass),
 			.samples = rhi::sample_counts::e1_bit
 		};
 
-		device_data_ptr_->framebuffer_formats.push_back(std::move(surface_ff));
+		data_ptr_->framebuffer_formats.push_back(std::move(surface_ff));
 	}
 
-
-	const std::size_t frame_count = surface ? device_data_ptr_->device->getSwapchainImagesKHR(device_data_ptr_->swapchain.get()).size() : 1;
-	device_data_ptr_->cmd_bufs.resize(frame_count);
-	device_data_ptr_->frames.resize(frame_count);
+	const std::size_t frame_count = surface ? data_ptr_->device->getSwapchainImagesKHR(data_ptr_->swapchain.get()).size() : 1;
+	data_ptr_->cmd_bufs.resize(frame_count);
+	data_ptr_->frames.resize(frame_count);
 	for (std::size_t i = 0; i < frame_count; i++)
 	{
 		vk::CommandPoolCreateInfo cmd_pool_create_info = vk::CommandPoolCreateInfo()
 			.setFlags(vk::CommandPoolCreateFlagBits::eResetCommandBuffer)
-			.setQueueFamilyIndex(device_data_ptr_->gfx_queue_fam_idx);
-		device_data_ptr_->frames[i].cmd_pool = device_data_ptr_->device->createCommandPoolUnique(cmd_pool_create_info);
+			.setQueueFamilyIndex(data_ptr_->gfx_queue_fam_idx);
+		data_ptr_->frames[i].cmd_pool = data_ptr_->device->createCommandPoolUnique(cmd_pool_create_info);
 
 		vk::CommandBufferAllocateInfo cmd_buf_alloc_info = vk::CommandBufferAllocateInfo()
-			.setCommandPool(device_data_ptr_->frames[i].cmd_pool.get())
+			.setCommandPool(data_ptr_->frames[i].cmd_pool.get())
 			.setLevel(vk::CommandBufferLevel::ePrimary)
 			.setCommandBufferCount(1);
-		device_data_ptr_->cmd_bufs[i] = std::move(device_data_ptr_->device->allocateCommandBuffersUnique(cmd_buf_alloc_info)[0]);
+		data_ptr_->cmd_bufs[i] = std::move(data_ptr_->device->allocateCommandBuffersUnique(cmd_buf_alloc_info)[0]);
 
-		device_data_ptr_->frames[i].cmd_buf_id = i;
-		device_data_ptr_->frames[i].has_framebuffer_bound = false;
+		data_ptr_->frames[i].cmd_buf_id = i;
+		data_ptr_->frames[i].has_framebuffer_bound = false;
 	}
 
 	if (surface)
 	{
-		device_data_ptr_->surface_frame_data.resize(frame_count);
-		std::vector<vk::Image> swapchain_images = device_data_ptr_->device->getSwapchainImagesKHR(device_data_ptr_->swapchain.get());
+		data_ptr_->surface_frame_data.resize(frame_count);
+		std::vector<vk::Image> swapchain_images = data_ptr_->device->getSwapchainImagesKHR(data_ptr_->swapchain.get());
 		for (std::size_t i = 0; i < frame_count; i++)
 		{
 			vk::ImageViewCreateInfo image_view_create_info = vk::ImageViewCreateInfo()
@@ -842,82 +930,82 @@ device::device(const context& ctx, surface* surface) :
 				.setFormat(surface_format)
 				.setComponents(vk::ComponentMapping()) // TODO: no swizzling for now
 				.setSubresourceRange(vk::ImageSubresourceRange(vk::ImageAspectFlagBits::eColor, 0, 1, 0, 1));
-			device_data_ptr_->surface_frame_data[i].image_view = device_data_ptr_->device->createImageViewUnique(image_view_create_info);
+			data_ptr_->surface_frame_data[i].image_view = data_ptr_->device->createImageViewUnique(image_view_create_info);
 
-			std::vector<vk::ImageView> attachments = { device_data_ptr_->surface_frame_data[i].image_view.get(), device_data_ptr_->depth_texture->image_view };
+			std::vector<vk::ImageView> attachments = { data_ptr_->surface_frame_data[i].image_view.get(), data_ptr_->depth_texture->image_view };
 
-			device_data_ptr_->surface_frame_data[i].framebuffer = framebuffer{
+			data_ptr_->surface_frame_data[i].framebuffer = framebuffer{
 				.format_id = surface_ffid,
 				.attachments = std::move(attachments),
 				.usages = { image_usage::color_attachment_bit, image_usage::depth_stencil_attachment_bit }, // TODO: others?
-				.width = device_data_ptr_->surface_extent.width,
-				.height = device_data_ptr_->surface_extent.height,
+				.width = data_ptr_->surface_extent.width,
+				.height = data_ptr_->surface_extent.height,
 				.layers = 1
 			};
 
 			vk::SemaphoreCreateInfo semaphore_create_info = vk::SemaphoreCreateInfo();
-			device_data_ptr_->frames[i].render_finished_semaphore = device_data_ptr_->device->createSemaphoreUnique(semaphore_create_info);
-			device_data_ptr_->frames[i].image_available_semaphore = device_data_ptr_->device->createSemaphoreUnique(semaphore_create_info);
+			data_ptr_->frames[i].render_finished_semaphore = data_ptr_->device->createSemaphoreUnique(semaphore_create_info);
+			data_ptr_->frames[i].image_available_semaphore = data_ptr_->device->createSemaphoreUnique(semaphore_create_info);
 
 			vk::FenceCreateInfo fence_create_info = vk::FenceCreateInfo()
 				.setFlags(vk::FenceCreateFlagBits::eSignaled);
-			device_data_ptr_->frames[i].fence = device_data_ptr_->device->createFenceUnique(fence_create_info);
+			data_ptr_->frames[i].fence = data_ptr_->device->createFenceUnique(fence_create_info);
 		}
 	}
 }
 
 device::~device() 
 {
-	free_texture(device_data_ptr_->depth_texture);
+	free_texture(data_ptr_->depth_texture);
 }
 
 
 format device::get_surface_format() const
 {
-	return device_data_ptr_->surface_format;
+	return data_ptr_->surface_format;
 }
 
 std::uint32_t device::get_frame() const
 {
-	return device_data_ptr_->frame;
+	return data_ptr_->frame;
 }
 
 void device::next_frame()
 {
-	device_data_ptr_->frame = (device_data_ptr_->frame + 1ui32) % static_cast<std::uint32_t>(device_data_ptr_->frames.size());
+	data_ptr_->frame = (data_ptr_->frame + 1ui32) % static_cast<std::uint32_t>(data_ptr_->frames.size());
 }
 
 void device::swap_buffers()
 {
-	device_data_ptr_->device->waitForFences({ device_data_ptr_->frames[device_data_ptr_->frame].fence.get() }, true, std::numeric_limits<uint64_t>::max());
-	device_data_ptr_->device->resetFences({ device_data_ptr_->frames[device_data_ptr_->frame].fence.get() });
+	data_ptr_->device->waitForFences({ data_ptr_->frames[data_ptr_->frame].fence.get() }, true, std::numeric_limits<uint64_t>::max());
+	data_ptr_->device->resetFences({ data_ptr_->frames[data_ptr_->frame].fence.get() });
 
-	vk::ResultValue<std::uint32_t> swapchain_image_idx = device_data_ptr_->device->acquireNextImageKHR(device_data_ptr_->swapchain.get(), std::numeric_limits<uint64_t>::max(),
-		device_data_ptr_->frames[device_data_ptr_->frame].image_available_semaphore.get(), nullptr);
+	vk::ResultValue<std::uint32_t> swapchain_image_idx = data_ptr_->device->acquireNextImageKHR(data_ptr_->swapchain.get(), std::numeric_limits<uint64_t>::max(),
+		data_ptr_->frames[data_ptr_->frame].image_available_semaphore.get(), nullptr);
 
-	cmd_buf_id cmd_buf_id = device_data_ptr_->frames[device_data_ptr_->frame].cmd_buf_id;
+	cmd_buf_id cmd_buf_id = data_ptr_->frames[data_ptr_->frame].cmd_buf_id;
 	vk::PipelineStageFlags pipeline_stage_flags = vk::PipelineStageFlagBits::eColorAttachmentOutput;
 	vk::SubmitInfo submit_info = vk::SubmitInfo()
 		.setPWaitDstStageMask(&pipeline_stage_flags)
 		.setWaitSemaphoreCount(1)
-		.setPWaitSemaphores(&device_data_ptr_->frames[device_data_ptr_->frame].image_available_semaphore.get())
+		.setPWaitSemaphores(&data_ptr_->frames[data_ptr_->frame].image_available_semaphore.get())
 		.setCommandBufferCount(1)
-		.setPCommandBuffers(&device_data_ptr_->cmd_bufs[cmd_buf_id].get())
+		.setPCommandBuffers(&data_ptr_->cmd_bufs[cmd_buf_id].get())
 		.setSignalSemaphoreCount(1)
-		.setPSignalSemaphores(&device_data_ptr_->frames[device_data_ptr_->frame].render_finished_semaphore.get());
-	vk::Queue gfx_submit_queue = device_data_ptr_->device->getQueue(device_data_ptr_->gfx_queue_fam_idx, 0); // TODO: do this in ctor?
-	gfx_submit_queue.submit({ submit_info }, device_data_ptr_->frames[device_data_ptr_->frame].fence.get());
+		.setPSignalSemaphores(&data_ptr_->frames[data_ptr_->frame].render_finished_semaphore.get());
+	vk::Queue gfx_submit_queue = data_ptr_->device->getQueue(data_ptr_->gfx_queue_fam_idx, 0); // TODO: do this in ctor?
+	gfx_submit_queue.submit({ submit_info }, data_ptr_->frames[data_ptr_->frame].fence.get());
 
 	// TODO: rn assuming present queue and gfx queue are same
 	vk::PresentInfoKHR present_info = vk::PresentInfoKHR()
 		.setWaitSemaphoreCount(1)
-		.setPWaitSemaphores(&device_data_ptr_->frames[device_data_ptr_->frame].render_finished_semaphore.get())
+		.setPWaitSemaphores(&data_ptr_->frames[data_ptr_->frame].render_finished_semaphore.get())
 		.setSwapchainCount(1)
-		.setPSwapchains(&device_data_ptr_->swapchain.get())
+		.setPSwapchains(&data_ptr_->swapchain.get())
 		.setPImageIndices(&swapchain_image_idx.value)
 		.setPResults(nullptr);
 
-	vk::Queue present_queue = device_data_ptr_->device->getQueue(device_data_ptr_->present_queue_fam_idx, 0);
+	vk::Queue present_queue = data_ptr_->device->getQueue(data_ptr_->present_queue_fam_idx, 0);
 	present_queue.presentKHR(present_info);
 }
 
@@ -927,7 +1015,7 @@ shader* device::create_shader(const create_shader_params& params)
 		.setFlags(vk::ShaderModuleCreateFlags())
 		.setCodeSize(params.bytecode.size())
 		.setPCode(reinterpret_cast<std::uint32_t*>(const_cast<char*>(params.bytecode.c_str())));
-	vk::ShaderModule shader_module = device_data_ptr_->device->createShaderModule(shader_module_create_info);
+	vk::ShaderModule shader_module = data_ptr_->device->createShaderModule(shader_module_create_info);
 	
 	shader* result = new shader;
 	result->pipeline_stage_create_info = vk::PipelineShaderStageCreateInfo()
@@ -942,7 +1030,7 @@ shader* device::create_shader(const create_shader_params& params)
 
 void device::free_shader(shader* shader)
 {
-	device_data_ptr_->device->destroyShaderModule(shader->pipeline_stage_create_info.module);
+	data_ptr_->device->destroyShaderModule(shader->pipeline_stage_create_info.module);
 	delete shader;
 }
 
@@ -1019,17 +1107,15 @@ texture* device::create_texture(const create_texture_params& params, std::vector
 	texture* result = new texture;
 
 	result->create_params = params;
-	result->image = device_data_ptr_->device->createImage(image_create_info);
 
-	vk::MemoryRequirements mem_requirements = device_data_ptr_->device->getImageMemoryRequirements(result->image);
+	VmaAllocationCreateInfo alloc_info = {
+		.usage = VMA_MEMORY_USAGE_GPU_ONLY
+	};
 
-	vk::MemoryAllocateInfo mem_alloc_info = vk::MemoryAllocateInfo()
-		.setAllocationSize(mem_requirements.size)
-		.setMemoryTypeIndex(impl_::find_memory_type(mem_requirements.memoryTypeBits, vk::MemoryPropertyFlags(), device_data_ptr_->physical_device));
-	
-	// TODO: use vma
-	result->memory = device_data_ptr_->device->allocateMemory(mem_alloc_info);
-	device_data_ptr_->device->bindImageMemory(result->image, result->memory, 0);
+	VkImage tmp_image;
+	VkImageCreateInfo tmp_image_create_info = image_create_info;
+	vmaCreateImage(data_ptr_->allocator, &tmp_image_create_info, &alloc_info, &tmp_image, &result->allocation, nullptr);
+	result->image = tmp_image;
 
 	vk::ImageSubresourceRange subresource_range = vk::ImageSubresourceRange(
 		(std::uint8_t(params.usage) & std::uint8_t(image_usage::depth_stencil_attachment_bit)) ? 
@@ -1043,7 +1129,7 @@ texture* device::create_texture(const create_texture_params& params, std::vector
 		.setComponents(vk::ComponentMapping()) // TODO: no swizzling for now
 		.setSubresourceRange(subresource_range);
 
-	result->image_view = device_data_ptr_->device->createImageView(image_view_create_info);
+	result->image_view = data_ptr_->device->createImageView(image_view_create_info);
 
 	if (data.size() > 0) {
 		for (std::uint32_t i = 0; i < image_create_info.arrayLayers; i++) {
@@ -1058,9 +1144,8 @@ texture* device::create_texture(const create_texture_params& params, std::vector
 
 void device::free_texture(texture* texture)
 {
-	device_data_ptr_->device->destroyImageView(texture->image_view);
-	device_data_ptr_->device->freeMemory(texture->memory);
-	device_data_ptr_->device->destroyImage(texture->image);
+	data_ptr_->device->destroyImageView(texture->image_view);
+	vmaDestroyImage(data_ptr_->allocator, texture->image, texture->allocation);
 	delete texture;
 }
 
@@ -1152,7 +1237,7 @@ device::framebuffer_format_id device::create_framebuffer_format(std::vector<atta
 		.setDependencyCount(0)
 		.setPDependencies(nullptr);
 
-	vk::UniqueRenderPass render_pass = device_data_ptr_->device->createRenderPassUnique(render_pass_create_info);
+	vk::UniqueRenderPass render_pass = data_ptr_->device->createRenderPassUnique(render_pass_create_info);
 
 	impl_::framebuffer_format new_format = impl_::framebuffer_format{
 		static_cast<std::uint32_t>(color_references.size()),
@@ -1160,8 +1245,8 @@ device::framebuffer_format_id device::create_framebuffer_format(std::vector<atta
 		formats[0].samples
 	};
 
-	framebuffer_format_id format_id = framebuffer_format_id(device_data_ptr_->framebuffer_formats.size());
-	device_data_ptr_->framebuffer_formats.push_back(std::move(new_format));
+	framebuffer_format_id format_id = framebuffer_format_id(data_ptr_->framebuffer_formats.size());
+	data_ptr_->framebuffer_formats.push_back(std::move(new_format));
 	return format_id;
 }
 
@@ -1207,7 +1292,7 @@ void device::free_framebuffer(framebuffer* framebuffer)
 
 framebuffer* device::get_surface_framebuffer() const
 {
-	return &device_data_ptr_->surface_frame_data[device_data_ptr_->frame].framebuffer;
+	return &data_ptr_->surface_frame_data[data_ptr_->frame].framebuffer;
 }
 
 device::framebuffer_format_id device::get_framebuffer_format(framebuffer* framebuffer) const
@@ -1235,13 +1320,13 @@ sampler* device::create_sampler(const create_sampler_params& params)
 		.setUnnormalizedCoordinates(params.unnormalized_coords);
 
 	sampler* result = new sampler;
-	result->sampler = device_data_ptr_->device->createSampler(sampler_create_info);
+	result->sampler = data_ptr_->device->createSampler(sampler_create_info);
 	return result;
 }
 
 void device::free_sampler(sampler* sampler)
 {
-	device_data_ptr_->device->destroySampler(sampler->sampler);
+	data_ptr_->device->destroySampler(sampler->sampler);
 	delete sampler;
 }
 
@@ -1272,24 +1357,22 @@ buffer* device::create_buffer(buffer_type type, const std::size_t size, const vo
 
 	buffer* result = new buffer;
 	result->size = size;
-	result->buffer = device_data_ptr_->device->createBuffer(buffer_create_info);
 
-	vk::MemoryRequirements mem_requirements = device_data_ptr_->device->getBufferMemoryRequirements(result->buffer);
+	VmaAllocationCreateInfo alloc_info = {
+		.usage = VMA_MEMORY_USAGE_CPU_TO_GPU
+	};
 
-	vk::MemoryAllocateInfo mem_alloc_info = vk::MemoryAllocateInfo()
-		.setAllocationSize(mem_requirements.size)
-		.setMemoryTypeIndex(impl_::find_memory_type(mem_requirements.memoryTypeBits, 
-			vk::MemoryPropertyFlagBits::eHostVisible | vk::MemoryPropertyFlagBits::eHostCoherent, device_data_ptr_->physical_device));
-
-	// TODO: use vma
-	result->memory = device_data_ptr_->device->allocateMemory(mem_alloc_info);
-	device_data_ptr_->device->bindBufferMemory(result->buffer, result->memory, 0);
+	VkBuffer tmp_buffer;
+	VkBufferCreateInfo tmp_buffer_create_info = buffer_create_info;
+	vmaCreateBuffer(data_ptr_->allocator, &tmp_buffer_create_info, &alloc_info, &tmp_buffer, &result->allocation, nullptr);
+	result->buffer = tmp_buffer;
 
 	if (data)
 	{
-		void* mapped_data = device_data_ptr_->device->mapMemory(result->memory, 0, size);
+		void* mapped_data;
+		vmaMapMemory(data_ptr_->allocator, result->allocation, &mapped_data);
 		memcpy(mapped_data, data, size);
-		device_data_ptr_->device->unmapMemory(result->memory);
+		vmaUnmapMemory(data_ptr_->allocator, result->allocation);
 	}
 
 	return result;
@@ -1299,28 +1382,28 @@ buffer* device::create_buffer(buffer_type type, const std::size_t size, const vo
 void device::update_buffer(buffer* buf, const std::size_t offset, const std::size_t size, const void const* data)
 {
 	// TODO: implement updating buffers
-	void* mapped_data = device_data_ptr_->device->mapMemory(buf->memory, 0, size);
+	void* mapped_data = data_ptr_->device->mapMemory(buf->memory, 0, size);
 	memcpy(mapped_data, data, size);
-	device_data_ptr_->device->unmapMemory(buf->memory);
+	data_ptr_->device->unmapMemory(buf->memory);
 }*/
 
 void device::free_buffer(buffer* buffer)
 {
-	device_data_ptr_->device->destroyBuffer(buffer->buffer);
-	device_data_ptr_->device->freeMemory(buffer->memory);
+	vmaDestroyBuffer(data_ptr_->allocator, buffer->buffer, buffer->allocation);
 	delete buffer;
 }
 
 template<>
 device::scoped_mmap<std::byte> device::map_buffer(buffer* buffer, const std::size_t offset, const std::size_t size) const
 {
-	void* mapped_data = device_data_ptr_->device->mapMemory(buffer->memory, offset, size);
+	void* mapped_data;
+	vmaMapMemory(data_ptr_->allocator, buffer->allocation, &mapped_data);
 	return scoped_mmap<std::byte>(reinterpret_cast<std::byte*>(mapped_data), size, this, buffer);
 }
 
 void device::unmap_buffer_mem(const buffer* buffer) const
 {
-	device_data_ptr_->device->unmapMemory(buffer->memory);
+	vmaUnmapMemory(data_ptr_->allocator, buffer->allocation);
 }
 
 device::vertex_format_id device::create_vertex_format(std::vector<vertex_attribute> attributes)
@@ -1331,11 +1414,11 @@ device::vertex_format_id device::create_vertex_format(std::vector<vertex_attribu
 		vk::PipelineVertexInputStateCreateInfo()
 	};
 
-	vertex_format_id format_id = device_data_ptr_->vertex_formats.size();
-	device_data_ptr_->vertex_formats.push_back(std::move(new_format));
+	vertex_format_id format_id = data_ptr_->vertex_formats.size();
+	data_ptr_->vertex_formats.push_back(std::move(new_format));
 
-	std::vector<vk::VertexInputBindingDescription>& binding_descs = device_data_ptr_->vertex_formats[format_id].bindings;
-	std::vector<vk::VertexInputAttributeDescription>& attribute_descs = device_data_ptr_->vertex_formats[format_id].attributes;
+	std::vector<vk::VertexInputBindingDescription>& binding_descs = data_ptr_->vertex_formats[format_id].bindings;
+	std::vector<vk::VertexInputAttributeDescription>& attribute_descs = data_ptr_->vertex_formats[format_id].attributes;
 
 	for (std::size_t i = 0; i < attributes.size(); i++)
 	{
@@ -1348,7 +1431,7 @@ device::vertex_format_id device::create_vertex_format(std::vector<vertex_attribu
 		attribute_descs[i].offset = attributes[i].offset;
 	}
 
-	device_data_ptr_->vertex_formats[format_id].input_state_create_info = vk::PipelineVertexInputStateCreateInfo()
+	data_ptr_->vertex_formats[format_id].input_state_create_info = vk::PipelineVertexInputStateCreateInfo()
 		.setFlags(vk::PipelineVertexInputStateCreateFlags())
 		.setVertexAttributeDescriptionCount(attribute_descs.size())
 		.setPVertexAttributeDescriptions(attribute_descs.size() != 0 ? attribute_descs.data() : nullptr)
@@ -1362,6 +1445,7 @@ device::uniform_set_format_id device::create_uniform_set_format(const std::vecto
 {
 	std::vector<vk::DescriptorSetLayoutBinding> layout_bindings;
 	layout_bindings.reserve(uniform_infos.size());
+	std::unordered_map<std::uint32_t, vk::DescriptorType> types;
 	for (const uniform_info& uniform_info : uniform_infos)
 	{
 		vk::ShaderStageFlags stage_bits = vk::ShaderStageFlags();
@@ -1375,23 +1459,22 @@ device::uniform_set_format_id device::create_uniform_set_format(const std::vecto
 		);
 
 		layout_bindings.push_back(temp_layout_binding);
+		types[uniform_info.binding] = temp_layout_binding.descriptorType;
 	}
 	
 
 	vk::DescriptorSetLayoutCreateInfo layout_create_info = vk::DescriptorSetLayoutCreateInfo()
 		.setBindingCount(layout_bindings.size())
 		.setPBindings(layout_bindings.data());
-	vk::UniqueDescriptorSetLayout layout = device_data_ptr_->device->createDescriptorSetLayoutUnique(layout_create_info);
+	vk::UniqueDescriptorSetLayout layout = data_ptr_->device->createDescriptorSetLayoutUnique(layout_create_info);
 
-	impl_::descriptor_set_format format = impl_::descriptor_set_format(std::move(layout), uniform_infos.size());
+	impl_::descriptor_set_format format;
+	format.layout = std::move(layout);
+	format.ds_counts = impl_::to_ds_counts(uniform_infos);
+	format.types = std::move(types);
 
-	for (const uniform_info& uniform_info : uniform_infos)
-	{
-		format.insert(uniform_info.binding, impl_::vulkan_uniform_types[std::uint8_t(uniform_info.type)]);
-	}
-
-	const uniform_set_format_id uniform_set_id = device_data_ptr_->descriptor_set_formats.size();
-	device_data_ptr_->descriptor_set_formats.push_back(std::move(format));
+	const uniform_set_format_id uniform_set_id = data_ptr_->descriptor_set_formats.size();
+	data_ptr_->descriptor_set_formats.push_back(std::move(format));
 	return uniform_set_id;
 }
 
@@ -1399,45 +1482,50 @@ uniform_set* device::create_uniform_set(const uniform_set_format_id format_id)
 {
 	static constexpr std::uint32_t max_descriptors_per_pool = 64;
 	
-	const impl_::descriptor_set_format& format = device_data_ptr_->descriptor_set_formats[format_id];
+	const impl_::descriptor_set_format& format = data_ptr_->descriptor_set_formats[format_id];
 
-	std::vector<std::uint32_t> type_counts = std::vector<std::uint32_t>(std::size_t(uniform_type::max), 0);
-	for (const auto& type : format.binding_types)
+	vk::DescriptorPool* desc_pool = data_ptr_->ds_pool_manager.get(format.ds_counts);
+	if (!desc_pool)
 	{
-		type_counts[std::uint8_t(type.second)]++;
+		std::vector<vk::DescriptorPoolSize> desc_pool_sizes;
+		auto add_non_zero = [&desc_pool_sizes](std::uint32_t n, vk::DescriptorType type) {
+			if (n > 0)
+			{
+				desc_pool_sizes.push_back(vk::DescriptorPoolSize().setDescriptorCount(n).setType(type));
+			}
+		};
+		add_non_zero(format.ds_counts.samplers, vk::DescriptorType::eSampler);
+		add_non_zero(format.ds_counts.combined_image_samplers, vk::DescriptorType::eCombinedImageSampler);
+		add_non_zero(format.ds_counts.sampled_images, vk::DescriptorType::eSampledImage);
+		add_non_zero(format.ds_counts.storage_images, vk::DescriptorType::eStorageImage);
+		add_non_zero(format.ds_counts.uniform_texel_buffers, vk::DescriptorType::eUniformTexelBuffer);
+		add_non_zero(format.ds_counts.storage_texel_buffers, vk::DescriptorType::eStorageTexelBuffer);
+		add_non_zero(format.ds_counts.uniform_buffers, vk::DescriptorType::eUniformBuffer);
+		add_non_zero(format.ds_counts.storage_buffers, vk::DescriptorType::eStorageBuffer);
+		add_non_zero(format.ds_counts.uniform_buffer_dynamics, vk::DescriptorType::eUniformBufferDynamic);
+		add_non_zero(format.ds_counts.storage_buffer_dynamics, vk::DescriptorType::eStorageBufferDynamic);
+		add_non_zero(format.ds_counts.input_attachments, vk::DescriptorType::eInputAttachment);
+
+		vk::DescriptorPoolCreateInfo desc_pool_create_info = vk::DescriptorPoolCreateInfo()
+			.setFlags(vk::DescriptorPoolCreateFlagBits::eFreeDescriptorSet) // What the fuck?
+			.setMaxSets(max_descriptors_per_pool)
+			.setPoolSizeCount(desc_pool_sizes.size())
+			.setPPoolSizes(desc_pool_sizes.data());
+
+		vk::UniqueDescriptorPool temp_desc_pool = data_ptr_->device->createDescriptorPoolUnique(desc_pool_create_info);
+		data_ptr_->ds_pool_manager.insert(format.ds_counts, std::move(temp_desc_pool));
+		desc_pool = &data_ptr_->ds_pool_manager.pools.back().get();
 	}
-
-	std::vector<vk::DescriptorPoolSize> desc_pool_sizes;
-	for (std::uint32_t i = 0; i < type_counts.size(); i++)
-	{
-		if (type_counts[i] > 0)
-		{
-			vk::DescriptorPoolSize temp_desc_pool_size = vk::DescriptorPoolSize(
-				impl_::vulkan_uniform_types[i], type_counts[i] * max_descriptors_per_pool
-			);
-			desc_pool_sizes.push_back(temp_desc_pool_size);
-		}
-	}
-
-	// fixy fix fix
-	vk::DescriptorPoolCreateInfo desc_pool_create_info = vk::DescriptorPoolCreateInfo()
-		.setFlags(vk::DescriptorPoolCreateFlagBits::eFreeDescriptorSet) // What the fuck?
-		.setMaxSets(max_descriptors_per_pool)
-		.setPoolSizeCount(desc_pool_sizes.size())
-		.setPPoolSizes(desc_pool_sizes.data());
-
-	vk::UniqueDescriptorPool temp_desc_pool = device_data_ptr_->device->createDescriptorPoolUnique(desc_pool_create_info);
-	device_data_ptr_->desc_pools.push_back(std::move(temp_desc_pool));
 
 	uniform_set* result = new uniform_set;
 
 	vk::DescriptorSetAllocateInfo desc_set_alloc_info = vk::DescriptorSetAllocateInfo()
-		.setDescriptorPool(device_data_ptr_->desc_pools.back().get())
+		.setDescriptorPool(*desc_pool)
 		.setDescriptorSetCount(1)
 		.setPSetLayouts(&format.layout.get());
-	std::vector<vk::DescriptorSet> desc_sets = device_data_ptr_->device->allocateDescriptorSets(desc_set_alloc_info);
+	std::vector<vk::DescriptorSet> desc_sets = data_ptr_->device->allocateDescriptorSets(desc_set_alloc_info);
 	result->desc_set = desc_sets[0];
-	result->owning_pool = device_data_ptr_->desc_pools.back().get();
+	result->owning_pool = *desc_pool;
 	result->format_id = format_id;
 
 	return result;
@@ -1445,16 +1533,16 @@ uniform_set* device::create_uniform_set(const uniform_set_format_id format_id)
 
 void device::free_uniform_set(uniform_set* uniform_set)
 {
-	device_data_ptr_->device->freeDescriptorSets(uniform_set->owning_pool, uniform_set->desc_set);
+	data_ptr_->device->freeDescriptorSets(uniform_set->owning_pool, uniform_set->desc_set);
 	delete uniform_set;
 }
 
 void device::update_uniform_set(uniform_set* set, const std::vector<uniform_set_write>& writes)
 {
-	const impl_::descriptor_set_format& set_format = device_data_ptr_->descriptor_set_formats[set->format_id];
+	const impl_::descriptor_set_format& set_format = data_ptr_->descriptor_set_formats[set->format_id];
 	for (const uniform_set_write& write : writes)
 	{
-		vk::DescriptorType type = set_format.get(write.binding);
+		vk::DescriptorType type = set_format.types.at(write.binding);
 
 		if (type == vk::DescriptorType::eUniformBuffer ||
 			type == vk::DescriptorType::eStorageBuffer)
@@ -1481,7 +1569,7 @@ void device::update_uniform_set(uniform_set* set, const std::vector<uniform_set_
 				.setPImageInfo(nullptr)
 				.setPTexelBufferView(nullptr);
 
-			device_data_ptr_->device->updateDescriptorSets({ desc_set_write }, {});
+			data_ptr_->device->updateDescriptorSets({ desc_set_write }, {});
 		}
 		else
 		{ // TODO: rest of uniform types
@@ -1493,7 +1581,7 @@ void device::update_uniform_set(uniform_set* set, const std::vector<uniform_set_
 pipeline* device::create_graphics_pipeline(std::vector<shader*> shaders, const std::vector<uniform_set_format_id>& ufids, framebuffer_format_id ffid, vertex_format_id vfid, primitive_topology topology, const pipeline_rasterization_state& rasterization_state,
 	const pipeline_multisample_state& multisample_state, const pipeline_depth_stencil_state& depth_stencil_state, const pipeline_color_blend_state& color_blend_state, dynamic_state dynamic_states)
 {
-	const impl_::vertex_format& v_fmt = device_data_ptr_->vertex_formats[vfid];
+	const impl_::vertex_format& v_fmt = data_ptr_->vertex_formats[vfid];
 	
 	vk::PipelineInputAssemblyStateCreateInfo input_assembly_create_info = vk::PipelineInputAssemblyStateCreateInfo()
 		.setTopology(impl_::topology_list[std::uint8_t(topology)])
@@ -1616,7 +1704,7 @@ pipeline* device::create_graphics_pipeline(std::vector<shader*> shaders, const s
 	std::vector<vk::DescriptorSetLayout> set_layouts;
 	for (const uniform_set_format_id ufid : ufids)
 	{
-		const impl_::descriptor_set_format& desc_set_format = device_data_ptr_->descriptor_set_formats[ufid];
+		const impl_::descriptor_set_format& desc_set_format = data_ptr_->descriptor_set_formats[ufid];
 		set_layouts.push_back(desc_set_format.layout.get());
 	}
 
@@ -1624,10 +1712,10 @@ pipeline* device::create_graphics_pipeline(std::vector<shader*> shaders, const s
 	vk::PipelineLayoutCreateInfo layout_create_info = vk::PipelineLayoutCreateInfo()
 		.setSetLayoutCount(set_layouts.size())
 		.setPSetLayouts(set_layouts.data());
-	result->layout = device_data_ptr_->device->createPipelineLayout(layout_create_info);
+	result->layout = data_ptr_->device->createPipelineLayout(layout_create_info);
 	
-	vk::RenderPass render_pass = device_data_ptr_->framebuffer_formats[ffid].render_pass.get();
-	//vk::Extent2D fb_extent = ffid == surface_ffid ? device_data_ptr_->surface_extent : device_data_ptr_->framebuffer_formats[ffid].
+	vk::RenderPass render_pass = data_ptr_->framebuffer_formats[ffid].render_pass.get();
+	//vk::Extent2D fb_extent = ffid == surface_ffid ? data_ptr_->surface_extent : data_ptr_->framebuffer_formats[ffid].
 	vk::GraphicsPipelineCreateInfo gfx_pipeline_create_info = vk::GraphicsPipelineCreateInfo()
 		.setStageCount(vk_shader_stages.size())
 		.setPStages(vk_shader_stages.data())
@@ -1646,15 +1734,15 @@ pipeline* device::create_graphics_pipeline(std::vector<shader*> shaders, const s
 		.setBasePipelineHandle({}) // VK_NULL_HANDLE
 		.setBasePipelineIndex(0);
 
-	result->pipeline = device_data_ptr_->device->createGraphicsPipeline({ /*VK_NULL_HANDLE*/ }, gfx_pipeline_create_info).value;
+	result->pipeline = data_ptr_->device->createGraphicsPipeline({ /*VK_NULL_HANDLE*/ }, gfx_pipeline_create_info).value;
 
 	return result;
 }
 
 void device::free_graphics_pipeline(pipeline* pipeline)
 {
-	device_data_ptr_->device->destroyPipeline(pipeline->pipeline);
-	device_data_ptr_->device->destroyPipelineLayout(pipeline->layout);
+	data_ptr_->device->destroyPipeline(pipeline->pipeline);
+	data_ptr_->device->destroyPipelineLayout(pipeline->layout);
 	delete pipeline;
 }
 
@@ -1663,7 +1751,7 @@ pipeline* device::create_compute_pipeline(shader* shader, const std::vector<unif
 	std::vector<vk::DescriptorSetLayout> set_layouts;
 	for (const uniform_set_format_id ufid : ufids)
 	{
-		const impl_::descriptor_set_format& desc_set_format = device_data_ptr_->descriptor_set_formats[ufid];
+		const impl_::descriptor_set_format& desc_set_format = data_ptr_->descriptor_set_formats[ufid];
 		set_layouts.push_back(desc_set_format.layout.get());
 	}
 
@@ -1671,7 +1759,7 @@ pipeline* device::create_compute_pipeline(shader* shader, const std::vector<unif
 	vk::PipelineLayoutCreateInfo layout_create_info = vk::PipelineLayoutCreateInfo()
 		.setSetLayoutCount(set_layouts.size())
 		.setPSetLayouts(set_layouts.data());
-	result->layout = device_data_ptr_->device->createPipelineLayout(layout_create_info);
+	result->layout = data_ptr_->device->createPipelineLayout(layout_create_info);
 
 	vk::ComputePipelineCreateInfo cpu_pipeline_create_info = vk::ComputePipelineCreateInfo()
 		.setFlags(vk::PipelineCreateFlags())
@@ -1679,37 +1767,37 @@ pipeline* device::create_compute_pipeline(shader* shader, const std::vector<unif
 		.setLayout(result->layout)
 		.setBasePipelineHandle(nullptr)
 		.setBasePipelineIndex(0);
-	result->pipeline = device_data_ptr_->device->createComputePipeline({}, cpu_pipeline_create_info).value;
+	result->pipeline = data_ptr_->device->createComputePipeline({}, cpu_pipeline_create_info).value;
 
 	return result;
 }
 
 void device::free_compute_pipeline(pipeline* pipeline)
 {
-	device_data_ptr_->device->destroyPipeline(pipeline->pipeline);
-	device_data_ptr_->device->destroyPipelineLayout(pipeline->layout);
+	data_ptr_->device->destroyPipeline(pipeline->pipeline);
+	data_ptr_->device->destroyPipelineLayout(pipeline->layout);
 	delete pipeline;
 }
 
 device::cmd_buf_id device::begin_cmd_buf()
 {
-	cmd_buf_id cmd_id = device_data_ptr_->frames[device_data_ptr_->frame].cmd_buf_id;
-	vk::CommandBuffer& cmd_buf = device_data_ptr_->cmd_bufs[cmd_id].get();
+	cmd_buf_id cmd_id = data_ptr_->frames[data_ptr_->frame].cmd_buf_id;
+	vk::CommandBuffer& cmd_buf = data_ptr_->cmd_bufs[cmd_id].get();
 
 	vk::CommandBufferBeginInfo cmd_buf_begin_info = vk::CommandBufferBeginInfo()
 		.setPInheritanceInfo(nullptr);
 	cmd_buf.begin(cmd_buf_begin_info);
 
-	device_data_ptr_->frames[device_data_ptr_->frame].has_framebuffer_bound = false;
+	data_ptr_->frames[data_ptr_->frame].has_framebuffer_bound = false;
 
 	return cmd_id;
 }
 
 void device::cmd_buf_bind_framebuffer(cmd_buf_id id, framebuffer* fb, const bind_framebuffer_params& params)
 {
-	vk::CommandBuffer& cmd_buf = device_data_ptr_->cmd_bufs[id].get();
+	vk::CommandBuffer& cmd_buf = data_ptr_->cmd_bufs[id].get();
 
-	if (device_data_ptr_->frames[device_data_ptr_->frame].has_framebuffer_bound)
+	if (data_ptr_->frames[data_ptr_->frame].has_framebuffer_bound)
 	{
 		cmd_buf.endRenderPass();
 	}
@@ -1731,7 +1819,7 @@ void device::cmd_buf_bind_framebuffer(cmd_buf_id id, framebuffer* fb, const bind
 	cmd_buf.setScissor(0, scissor);
 
 	const framebuffer_format_id ffid = fb->format_id;
-	const impl_::framebuffer_format& fb_fmt = device_data_ptr_->framebuffer_formats[ffid];
+	const impl_::framebuffer_format& fb_fmt = data_ptr_->framebuffer_formats[ffid];
 	vk::FramebufferCreateInfo framebuffer_create_info = vk::FramebufferCreateInfo()
 		.setRenderPass(fb_fmt.render_pass.get())
 		.setAttachmentCount(fb->attachments.size())
@@ -1739,8 +1827,8 @@ void device::cmd_buf_bind_framebuffer(cmd_buf_id id, framebuffer* fb, const bind
 		.setWidth(fb->width)
 		.setHeight(fb->height)
 		.setLayers(fb->layers);
-	device_data_ptr_->frames[device_data_ptr_->frame].bound_framebuffers.push_back(
-		device_data_ptr_->device->createFramebufferUnique(framebuffer_create_info)
+	data_ptr_->frames[data_ptr_->frame].bound_framebuffers.push_back(
+		data_ptr_->device->createFramebufferUnique(framebuffer_create_info)
 	);
 	std::vector<vk::ClearValue> clear_values;
 	std::uint32_t color_idx = 0;
@@ -1766,7 +1854,7 @@ void device::cmd_buf_bind_framebuffer(cmd_buf_id id, framebuffer* fb, const bind
 
 	vk::RenderPassBeginInfo render_pass_begin_info = vk::RenderPassBeginInfo()
 		.setRenderPass(fb_fmt.render_pass.get())
-		.setFramebuffer(device_data_ptr_->frames[device_data_ptr_->frame].bound_framebuffers.back().get())
+		.setFramebuffer(data_ptr_->frames[data_ptr_->frame].bound_framebuffers.back().get())
 		.setRenderArea(vk::Rect2D()
 			.setExtent(vk::Extent2D(fb->width, fb->height))
 			.setOffset(vk::Offset2D())
@@ -1776,19 +1864,19 @@ void device::cmd_buf_bind_framebuffer(cmd_buf_id id, framebuffer* fb, const bind
 
 	cmd_buf.beginRenderPass(render_pass_begin_info, vk::SubpassContents::eInline);
 
-	device_data_ptr_->frames[device_data_ptr_->frame].has_framebuffer_bound = true;
+	data_ptr_->frames[data_ptr_->frame].has_framebuffer_bound = true;
 }
 
 void device::cmd_buf_bind_gfx_pipeline(cmd_buf_id id, pipeline* pipeline)
 {
-	vk::CommandBuffer& cmd_buf = device_data_ptr_->cmd_bufs[id].get();
+	vk::CommandBuffer& cmd_buf = data_ptr_->cmd_bufs[id].get();
 
 	cmd_buf.bindPipeline(vk::PipelineBindPoint::eGraphics, pipeline->pipeline);
 }
 
 void device::cmd_buf_bind_uniform_set(cmd_buf_id id, uniform_set* uniform_set, pipeline* pipeline, std::uint32_t index)
 {
-	vk::CommandBuffer& cmd_buf = device_data_ptr_->cmd_bufs[id].get();
+	vk::CommandBuffer& cmd_buf = data_ptr_->cmd_bufs[id].get();
 	cmd_buf.bindDescriptorSets(vk::PipelineBindPoint::eGraphics, pipeline->layout, index, { uniform_set->desc_set }, { });
 }
 
@@ -1802,19 +1890,19 @@ void device::cmd_buf_bind_vertex_array(cmd_buf_id id, const std::vector<buffer*>
 
 	std::vector<vk::DeviceSize> offsets(vertex_array.size(), 0);
 
-	vk::CommandBuffer& cmd_buf = device_data_ptr_->cmd_bufs[id].get();
+	vk::CommandBuffer& cmd_buf = data_ptr_->cmd_bufs[id].get();
 	cmd_buf.bindVertexBuffers(0, temp_buffers, offsets);
 }
 
 void device::cmd_buf_bind_index_array(cmd_buf_id id, buffer* index_array, index_type index_type)
 {
-	vk::CommandBuffer& cmd_buf = device_data_ptr_->cmd_bufs[id].get();
+	vk::CommandBuffer& cmd_buf = data_ptr_->cmd_bufs[id].get();
 	cmd_buf.bindIndexBuffer(index_array->buffer, 0, index_type == index_type::uint16 ? vk::IndexType::eUint16 : vk::IndexType::eUint32);
 }
 
 void device::cmd_buf_draw(cmd_buf_id id, bool use_indices, std::uint32_t element_count, std::uint32_t instances)
 {
-	vk::CommandBuffer& cmd_buf = device_data_ptr_->cmd_bufs[id].get();
+	vk::CommandBuffer& cmd_buf = data_ptr_->cmd_bufs[id].get();
 	if (use_indices)
 	{
 		cmd_buf.drawIndexed(element_count, instances, 0, 0, 0);
@@ -1827,20 +1915,20 @@ void device::cmd_buf_draw(cmd_buf_id id, bool use_indices, std::uint32_t element
 
 void device::cmd_buf_end(cmd_buf_id id)
 {
-	vk::CommandBuffer& cmd_buf = device_data_ptr_->cmd_bufs[id].get();
-	if (device_data_ptr_->frames[device_data_ptr_->frame].has_framebuffer_bound)
+	vk::CommandBuffer& cmd_buf = data_ptr_->cmd_bufs[id].get();
+	if (data_ptr_->frames[data_ptr_->frame].has_framebuffer_bound)
 	{
 		cmd_buf.endRenderPass();
 	}
 	cmd_buf.end();
 
-	device_data_ptr_->frames[device_data_ptr_->frame].has_framebuffer_bound = false;
+	data_ptr_->frames[data_ptr_->frame].has_framebuffer_bound = false;
 }
 
 void device::cmd_buf_bind_cpu_pipeline(cmd_buf_id id, pipeline* pipeline)
 {
-	vk::CommandBuffer& cmd_buf = device_data_ptr_->cmd_bufs[id].get();
-	if (device_data_ptr_->frames[device_data_ptr_->frame].has_framebuffer_bound)
+	vk::CommandBuffer& cmd_buf = data_ptr_->cmd_bufs[id].get();
+	if (data_ptr_->frames[data_ptr_->frame].has_framebuffer_bound)
 	{
 		cmd_buf.endRenderPass();
 	}
@@ -1849,7 +1937,7 @@ void device::cmd_buf_bind_cpu_pipeline(cmd_buf_id id, pipeline* pipeline)
 
 void device::cmd_buf_dispatch(cmd_buf_id id, std::uint32_t x_groups, std::uint32_t y_groups, std::uint32_t z_groups)
 {
-	vk::CommandBuffer& cmd_buf = device_data_ptr_->cmd_bufs[id].get();
+	vk::CommandBuffer& cmd_buf = data_ptr_->cmd_bufs[id].get();
 	cmd_buf.dispatch(x_groups, y_groups, z_groups);
 }
 

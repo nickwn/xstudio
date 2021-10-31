@@ -1,32 +1,27 @@
 cmake_minimum_required (VERSION 3.0)
 project (xstudio)
 
-# ImGui dir for compiling with project
 set(IMGUI_DIR "deps/imgui")
 set(SPV_REFLECT_DIR "deps/SPIRV-Reflect")
+set(SPV_TOOLS_DIR "deps/SPIRV-Tools")
+set(SPV_DIR "deps/glslang/")
+set(VMA_DIR "deps/VulkanMemoryAllocator/src")
 
-find_package(LLVM REQUIRED CONFIG)
-find_package(Vulkan REQUIRED)
-find_package(Eigen3 REQUIRED)
+find_package(Eigen3 CONFIG REQUIRED)
 
-message(STATUS "Found LLVM ${LLVM_PACKAGE_VERSION}")
-message(STATUS "Using LLVMConfig.cmake in: ${LLVM_DIR}")
-
-llvm_map_components_to_libnames(llvm_libs support core irreader)
-
-file(GLOB_RECURSE XSTUDIO_HPP "src/*.hpp")
 file(GLOB_RECURSE XSTUDIO_CPP "src/*.cpp")
-file(GLOB IMGUI_CPP "${IMGUI_DIR}/**.cpp")
-file(GLOB SPV_REFLECT_CPP "${SPV_REFLECT_DIR}/spirv_reflect.c")
-file(GLOB SPV_REFLECT_HPP "${SPV_REFLECT_DIR}/spirv_reflect.h")
+file(GLOB_RECURSE XSTUDIO_C "src/*.c")
+set(SPV_REFLECT_CPP "${SPV_REFLECT_DIR}/spirv_reflect.c")
 
-list(APPEND XS_COMPILE_DEFINITIONS UNICODE _UNICODE EIGEN_HAS_STD_INVOKE_RESULT)
+list(APPEND XS_COMPILE_DEFINITIONS UNICODE _UNICODE EIGEN_HAS_STD_INVOKE_RESULT) 
 if (WIN32)
-	list(APPEND XS_COMPILE_DEFINITIONS WINDOWS NOMINMAX VK_USE_PLATFORM_WIN32_KHR _CONSOLE)
+	list(APPEND XS_COMPILE_DEFINITIONS WINDOWS NOMINMAX VK_USE_PLATFORM_WIN32_KHR _CONSOLE YY_NO_UNISTD_H)
 endif(WIN32)
 
-add_executable(xstudio WIN32 ${XSTUDIO_CPP} ${SPV_REFLECT_CPP}) #${IMGUI_CPP})
+message("$ENV{VULKAN_SDK}")
+add_executable(xstudio WIN32 ${XSTUDIO_CPP} ${XSTUDIO_C} ${SPV_REFLECT_CPP}) 
 target_compile_definitions(xstudio PUBLIC ${XS_COMPILE_DEFINITIONS})
-target_include_directories(xstudio PUBLIC ${IMGUI_DIR} ${SPV_REFLECT_DIR})
-target_link_libraries(xstudio PRIVATE ${llvm_libs} Vulkan::Vulkan PUBLIC Eigen3::Eigen)
-set_property(TARGET xstudio PROPERTY CXX_STANDARD 20)
+target_include_directories(xstudio PUBLIC "$ENV{VULKAN_SDK}/include" ${VMA_DIR} ${SPV_REFLECT_DIR} ${SPV_DIR})
+target_link_directories(xstudio PUBLIC "$ENV{VULKAN_SDK}/Lib")
+target_link_libraries(xstudio PRIVATE vulkan-1 SPIRV-Toolsd SPIRV-Tools-optd SPIRV-Tools-sharedd PUBLIC Eigen3::Eigen) 
+set_property(TARGET xstudio PROPERTY CXX_STANDARD 20) 

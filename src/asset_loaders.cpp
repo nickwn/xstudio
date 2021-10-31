@@ -4,7 +4,7 @@
 #include <cassert>
 #include <optional>
 
-#include "meth/math.hpp"
+#include "math/math.hpp"
 
 namespace xs
 {

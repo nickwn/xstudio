@@ -11,6 +11,8 @@ struct SpvReflectShaderModule;
 
 namespace xs
 {
+class script_context;
+
 namespace rhi
 {
 	class device;

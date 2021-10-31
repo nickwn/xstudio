@@ -4,11 +4,13 @@
 #include <thread>
 #include <numeric>
 
+#include "script/script.hpp"
+
 #include <Windows.h>
 
 #include <fcntl.h>
 
-#include "meth/math.hpp"
+#include "math/math.hpp"
 #include "rhi/rhi.hpp"
 #include "renderer.hpp"
 #include "skel.hpp"
@@ -50,24 +52,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	xs::rhi::context ctx = xs::rhi::context(&hInstance); 
 	std::shared_ptr<xs::rhi::surface> window = std::make_unique<xs::rhi::surface>(ctx, L"test window", 1920, 1080);
 	std::shared_ptr<xs::rhi::device> device = std::make_shared<xs::rhi::device>(ctx, window.get());
-
-	std::shared_ptr<xs::skeleton> skel = xs::loaders::load_skeleton(skel_filename);
-	std::shared_ptr<xs::skinned_mesh> skinned_mesh = xs::loaders::load_skinned_mesh(skin_filename);
-	std::shared_ptr<xs::rig> rig = std::make_shared<xs::rig>(skel, skinned_mesh);
-	
-	/*const std::size_t cloth_res = 32;
-	std::vector<xs::sim::size2_t> fixed_idxs = { {0, 0}, { cloth_res - 1, 0 } };
-	std::shared_ptr<xs::cloth> cloth = std::make_shared<xs::cloth>(xs::sim::size2_t{ cloth_res, cloth_res },
-		xs::mth::pos(-2.f, -2.f, 0.f), xs::mth::pos(2.f, 2.f, 0.f), fixed_idxs
-	);
-
-	std::shared_ptr<xs::sph_sim> sph_sim = std::make_shared<xs::sph_sim>(
-		xs::sim::range3_t{ xs::mth::pos(-.5f), xs::mth::pos(.5f) }, 800, .2f, 1000000.f, 1.f // h, p0, k
-	);*/
-	std::shared_ptr<xs::skeletal_anim> skel_anim = xs::loaders::load_skeletal_anim(anim_filename);
-	xs::player anim_player = xs::player(skel_anim);
-	anim_player.add_rig(rig);
-	anim_player.play();
+	std::shared_ptr<xs::script_context> script_ctx = std::make_shared<xs::script_context>(ctx);
 
 	std::unique_ptr<xs::renderer> renderer = std::make_unique<xs::renderer>(device, window);
 
@@ -78,6 +63,31 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 	//mvp_buf.view = xs::mth::look_at(xs::mth::pos(0.f, -40.f, -60.f), xs::mth::pos(0.f, 0.f, 0.f), xs::mth::dir(0.f, 1.f, 0.f));
 	mvp_buf.proj = xs::mth::perspective(xs::mth::to_rad(60.f), window->get_width(), window->get_height(), .1f, 100.f);
 	auto d_mvp_buf = device->create_buffer_unique(xs::rhi::buffer_type::uniform, sizeof(mvp_buf), &mvp_buf);
+
+	script_ctx->parse("../shaders/test.xs");
+
+	xs::ast::types::none none_type = xs::ast::types::none();
+	xs::ast::types::real f32_type = xs::ast::types::real(32);
+	auto call_node = std::make_unique<xs::ast::nodes::call>(&f32_type, xs::ast::binding("bar"), 
+		std::vector<std::unique_ptr<xs::ast::node>>{});
+	auto root_node = std::make_unique<xs::ast::nodes::function>(&none_type, xs::ast::binding("main"), 
+		std::move(call_node), std::vector<xs::ast::nodes::variable>{});
+	xs::fvector<std::uint32_t> spirv = script_ctx->compile(std::move(root_node));
+	script_ctx->add(std::move(spirv));
+
+	//xs::script_instance script_inst = xs::script_instance(script_ctx, { "test" }, nullptr);
+
+	xs::renderer::stage_params points_vs = {
+		.stage = xs::rhi::shader_stage::vertex,
+		.filename = "../shaders/spirv/vert_sph.spv"
+	};
+	xs::renderer::stage_params points_fs = {
+		.stage = xs::rhi::shader_stage::fragment,
+		.filename = "../shaders/spirv/frag_sph.spv"
+	};
+	const xs::render_pass& simple_points_pass = xs::render_pass_registry::get().add("simple_points",
+		renderer->create_graphics_pass({ points_vs, points_fs }, xs::rhi::primitive_topology::points)
+	);
 
 	xs::renderer::stage_params skinned_vs = {
 		.stage = xs::rhi::shader_stage::vertex,
@@ -116,24 +126,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine
 		renderer->create_graphics_pass({ skel_vs, skel_fs }, xs::rhi::primitive_topology::lines)
 	);
 
-	xs::renderer::stage_params points_vs = {
-		.stage = xs::rhi::shader_stage::vertex,
-		.filename = "../shaders/spirv/vert_sph.spv"
-	};
-	xs::renderer::stage_params points_fs = {
-		.stage = xs::rhi::shader_stage::fragment,
-		.filename = "../shaders/spirv/frag_sph.spv"
-	};
-	const xs::render_pass& simple_points_pass = xs::render_pass_registry::get().add("simple_points",
-		renderer->create_graphics_pass({ points_vs, points_fs }, xs::rhi::primitive_topology::points)
-	);
-
 	//xs::draw_item cloth_draw_item = cloth->draw_item(device.get(), d_mvp_buf.get());
-	xs::draw_item rig_draw_item = skinned_mesh->draw_item(device.get(), d_mvp_buf.get());
-	xs::draw_item skel_draw_item = skel->draw_item(device.get(), d_mvp_buf.get());
+	//xs::draw_item rig_draw_item = skinned_mesh->draw_item(device.get(), d_mvp_buf.get());
+	//xs::draw_item skel_draw_item = skel->draw_item(device.get(), d_mvp_buf.get());
 	//xs::draw_item sph_draw_item = sph_sim->draw_item(device.get(), d_mvp_buf.get());
 
-	renderer->update_draw_list({ rig_draw_item, skel_draw_item });
+	//renderer->update_draw_list({ rig_draw_item, skel_draw_item });
 	MSG msg = { };
 	while (GetMessage(&msg, NULL, 0, 0))
 	{
